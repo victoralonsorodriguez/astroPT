@@ -30,7 +30,7 @@ if [[ "$REPO_ROOT" == "/var/spool"* ]]; then
     fi
 fi
 
-PYTHON_SCRIPT="$REPO_ROOT/scripts/analysis/dashboards/plot_r2_diff.py"
+PYTHON_SCRIPT="$REPO_ROOT/scripts/analysis/dashboards/dash_probing_differences.py"
 
 #--- ARGUMENT PARSING (FLAGS) ---#
 EMB_DIR=""
