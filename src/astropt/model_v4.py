@@ -789,6 +789,97 @@ class GPT_V4(GPT):
         # Build sequence with expert tokens
         x, expert_positions, modality_indices = self.embedding_layer(inputs, batch_modes)
 
+        # Apply token mixing (reorder patches) if configured
+        import copy
+        import math
+        orig_modality_indices = copy.deepcopy(modality_indices)
+        orig_expert_positions = copy.deepcopy(expert_positions)
+        
+        interleaved_idx = None
+        if self.config.use_token_mixing and len(batch_modes) >= 2:
+            stochastic = getattr(self.config, 'token_mixing_stochastic', False)
+            min_block = max(1, getattr(self.config, 'token_mixing_min_block_size', 1))
+            max_block = max(min_block, getattr(self.config, 'token_mixing_max_block_size',
+                           getattr(self.config, 'token_mixing_block_size', 5)))
+
+            mod_lengths = [int(inputs[m].size(1)) for m in batch_modes]
+            total_patches = sum(mod_lengths)
+
+            # Check if aperture embedding is enabled and we have both EuclidImage and DESISpectrum
+            if self.config.use_aperture_embedding and "EuclidImage" in batch_modes and "DESISpectrum" in batch_modes:
+                img_idx = batch_modes.index("EuclidImage")
+                spec_idx = batch_modes.index("DESISpectrum")
+
+                pixel_scale = 0.1
+                aperture_radius_arcsec = 1.5
+                patch_size = getattr(self.config, "images_patch_size", 16)
+
+                fiber_diameter_pixels = 2.0 * aperture_radius_arcsec / pixel_scale
+                patches_needed = fiber_diameter_pixels / patch_size
+                m = math.ceil(patches_needed)
+                if m % 2 == 0:
+                    m += 1
+                m = max(1, m)
+                k_core = m * m
+                k_core = min(k_core, mod_lengths[img_idx])
+
+                lengths_to_interleave = [k_core, mod_lengths[spec_idx]] if img_idx < spec_idx else [mod_lengths[spec_idx], k_core]
+
+                rel_interleaved = self._get_interleaved_indices(
+                    lengths_to_interleave, stochastic, min_block, max_block,
+                    self.config.token_mixing_block_size, 'last',
+                    x.device,
+                )
+                rel_interleaved = rel_interleaved[:-1]  # Remove trailing CLS index
+
+                offsets = [sum(mod_lengths[:i]) for i in range(len(batch_modes))]
+                img_offset = offsets[img_idx]
+                spec_offset = offsets[spec_idx]
+
+                abs_interleaved_core_spec = []
+                for rel_idx in rel_interleaved.tolist():
+                    if img_idx < spec_idx:
+                        if rel_idx < k_core:
+                            abs_interleaved_core_spec.append(img_offset + rel_idx)
+                        else:
+                            abs_interleaved_core_spec.append(spec_offset + (rel_idx - k_core))
+                    else:
+                        if rel_idx < mod_lengths[spec_idx]:
+                            abs_interleaved_core_spec.append(spec_offset + rel_idx)
+                        else:
+                            abs_interleaved_core_spec.append(img_offset + (rel_idx - mod_lengths[spec_idx]))
+
+                abs_outskirts = list(range(img_offset + k_core, img_offset + mod_lengths[img_idx]))
+                patch_interleaved = torch.tensor(abs_interleaved_core_spec + abs_outskirts, device=x.device, dtype=torch.long)
+            else:
+                patch_interleaved = self._get_interleaved_indices(
+                    mod_lengths, stochastic, min_block, max_block,
+                    self.config.token_mixing_block_size, 'last',
+                    x.device,
+                )
+                patch_interleaved = patch_interleaved[:total_patches]
+
+            n_experts = len(batch_modes)
+            has_cls = getattr(self.config, 'use_cls_token', False)
+            suffix_indices = torch.arange(total_patches, total_patches + n_experts + (1 if has_cls else 0), device=x.device, dtype=torch.long)
+            full_interleaved = torch.cat([
+                patch_interleaved,
+                suffix_indices,
+            ])
+            interleaved_idx = full_interleaved
+
+            # Update modality_indices to reflect the new positions after interleaving
+            modality_indices = self._update_modality_indices_after_mix(
+                batch_modes, mod_lengths, patch_interleaved
+            )
+
+            # Expert positions stay in order after patches
+            for i, mod_name in enumerate(batch_modes):
+                expert_positions[mod_name] = total_patches + i
+
+            # Reorder the sequence
+            x = x[:, full_interleaved, :]
+
         # Build the unimodal mask for Phase 1
         total_seq_len = x.size(1)
         unimodal_attn_mask = self._build_unimodal_dense_mask(
@@ -813,6 +904,15 @@ class GPT_V4(GPT):
             for layer_idx in range(self._fusion_layer, self.config.n_layer):
                 x = self.transformer.h[layer_idx](x)
             embeddings_out = self.transformer.ln_f(x)
+
+        # De-interleave hidden states if token mixing was applied
+        if interleaved_idx is not None:
+            deinterleaved = torch.empty_like(embeddings_out)
+            deinterleaved[:, interleaved_idx, :] = embeddings_out
+            embeddings_out = deinterleaved
+            # Revert to original sequential positions for splitting
+            modality_indices = orig_modality_indices
+            expert_positions = orig_expert_positions
 
         # Split modality patch embeddings
         result = {}

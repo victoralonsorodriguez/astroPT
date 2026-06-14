@@ -1248,6 +1248,27 @@ class GPT(nn.Module):
                 batch_modes = [k for k in inputs if k in self.mod_names]
             x = self.embedding_layer(inputs, batch_modes)
             
+            # Apply token mixing if enabled and we have multiple modalities
+            interleaved_idx = None
+            if self.config.use_token_mixing and len(batch_modes) >= 2:
+                stochastic = getattr(self.config, 'token_mixing_stochastic', False)
+                min_block = getattr(self.config, 'token_mixing_min_block_size', 1)
+                min_block = max(1, min_block)
+                max_block = getattr(self.config, 'token_mixing_max_block_size',
+                                   getattr(self.config, 'token_mixing_block_size', 5))
+                max_block = max(min_block, max_block)
+                cls_pos = getattr(self.config, 'cls_position', 'last').lower()
+                mod_lengths = [inputs[m].size(1) for m in batch_modes]
+                interleaved_idx = self._get_interleaved_indices(
+                    mod_lengths,
+                    stochastic,
+                    min_block, max_block,
+                    self.config.token_mixing_block_size,
+                    cls_pos,
+                    x.device
+                )
+                x = x[:, interleaved_idx, :]
+
             for i, block in enumerate(self.transformer.h):
                 x = block(x)
                 if draw_from_centre and i == len(self.transformer.h) // 2:
@@ -1257,6 +1278,12 @@ class GPT(nn.Module):
                 embeddings_out = self.transformer.ln_f(x)
             else:
                 embeddings_out = centre_embeddings
+
+            # De-interleave hidden states if token mixing was applied
+            if interleaved_idx is not None:
+                deinterleaved = torch.empty_like(embeddings_out)
+                deinterleaved[:, interleaved_idx, :] = embeddings_out
+                embeddings_out = deinterleaved
 
             # split embeddings by modality
             result = {}
