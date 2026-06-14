@@ -20,10 +20,10 @@ LAUNCH_SCRIPT="$REPO_ROOT/slurm/trainers/launch_pipeline.sh"
 
 # --- USER CONFIGURATION ---
 # Target date format: YYYY-MM-DD HH:MM:SS (GNU date format)
-TARGET_DATE="2026-05-15 00:00:00"
+TARGET_DATE="2026-06-12 00:30:00"
 
 # Training configuration
-CONFIG_FILE="$REPO_ROOT/configs/default_config.yaml"
+CONFIG_FILE="$REPO_ROOT/config/20260612_Autoregresive_Optimized.yaml"
 TRAIN_NAME="scheduled_experiment"
 TRAIN_DESC="Add your detailed description here"
 EXTRA_ARGS=""
@@ -43,7 +43,7 @@ SLEEP_TIME=$((TARGET_TIME - CURRENT_TIME))
 
 if [ "$SLEEP_TIME" -le 0 ]; then
     echo "[!] The target date has already passed. Executing immediately..."
-    $LAUNCH_SCRIPT -c "$CONFIG_FILE" -n "$TRAIN_NAME" -d "$TRAIN_DESC" -x "$EXTRA_ARGS"
+    $LAUNCH_SCRIPT -c "$CONFIG_FILE"
     exit 0
 fi
 
@@ -62,4 +62,4 @@ echo "-----------------------------------------------------------------"
 sleep "$SLEEP_TIME"
 
 echo "[$(date)] Time reached. Launching pipeline..."
-$LAUNCH_SCRIPT -c "$CONFIG_FILE" -n "$TRAIN_NAME" -d "$TRAIN_DESC" -x "$EXTRA_ARGS"
+$LAUNCH_SCRIPT -c "$CONFIG_FILE"
