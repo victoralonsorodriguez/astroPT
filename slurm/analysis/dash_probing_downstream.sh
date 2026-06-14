@@ -65,12 +65,20 @@ done
 
 shift $((OPTIND - 1))
 
-if [[ -z "${EMB_DIR:-}" ]]; then
-    echo "[ERROR]: EMB_DIR is required (-e <embeddings_root>)"
-    exit 1
+EMB_DIR="${EMB_DIR:-}"
+
+if [[ -z "$EMB_DIR" ]]; then
+    if [[ "$INTERACTIVE_MODE" -eq 1 ]]; then
+        echo "[INFO]: No EMB_DIR specified. Launching interactive dashboard on baselines only."
+    else
+        echo "[ERROR]: EMB_DIR is required (-e <embeddings_root>)"
+        exit 1
+    fi
 fi
 
-EMB_DIR=$(readlink -f "$EMB_DIR")
+if [[ -n "$EMB_DIR" ]]; then
+    EMB_DIR=$(readlink -f "$EMB_DIR")
+fi
 
 #--- ENVIRONMENT SETUP ---#
 NOW=$(date "+[%Y-%m-%d - %H:%M:%S]")
@@ -95,9 +103,11 @@ export XDG_CACHE_HOME="/home/valonso/iac18_mhuertas_shared/valonso/cache"
 if [ -n "${SAVE_DIR:-}" ]; then
     SAVE_DIR=$(readlink -f "$SAVE_DIR")
     SAVE_ARG="--save_dir $SAVE_DIR"
-else
+elif [ -n "$EMB_DIR" ]; then
     # Default to current embedding folder's downstream_tasks
     SAVE_ARG="--save_dir $EMB_DIR"
+else
+    SAVE_ARG=""
 fi
 
 SAVE_NAME_ARGS=()
@@ -115,34 +125,34 @@ echo "    INTERACTIVE:    $INTERACTIVE_MODE"
 declare -A BASELINE_MAP
 LOGS_BASE="/home/valonso/iac18_mhuertas_shared/valonso/astroPT/logs"
 
-BASELINE_MAP["${LOGS_BASE}/astropt_100M_250K_arrow_20260408_baseline_images"]="AstroPT Baseline (Images)"
-BASELINE_MAP["${LOGS_BASE}/supervised_baseline_images_filter/supervised_baseline_images_results.csv"]="Images Supervised Filter"
-BASELINE_MAP["${LOGS_BASE}/supervised_baseline_images/supervised_baseline_images_results.csv"]="Images Supervised"
-BASELINE_MAP["${LOGS_BASE}/astropt_100M_250K_arrow_20260409_baseline_spectra"]="AstroPT Baseline (Spectra)"
-BASELINE_MAP["${LOGS_BASE}/supervised_baseline_spectra_filter/supervised_baseline_spectra_results.csv"]="Spectra Supervised Filter"
-BASELINE_MAP["${LOGS_BASE}/supervised_baseline_spectra/supervised_baseline_spectra_results.csv"]="Spectra Supervised"
+BASELINE_MAP["${LOGS_BASE}/astropt_20260611_filter_unimodal_images"]="AstroPT Baseline Images"
+BASELINE_MAP["${LOGS_BASE}/supervised_baseline_images_FILTERED/supervised_baseline_images_results.csv"]="Images Supervised"
+BASELINE_MAP["${LOGS_BASE}/astropt_20260607_filter_unimodal_spectra"]="AstroPT Baseline Spectra"
+BASELINE_MAP["${LOGS_BASE}/supervised_baseline_spectra_FILTERED/supervised_baseline_spectra_results.csv"]="Spectra Supervised"
 BASELINE_MAP["${LOGS_BASE}/astroclip_20260422_matchingastropt/embeddings/astroclip-step0031000-valloss0.6454"]="AstroCLIP"
-BASELINE_MAP["${LOGS_BASE}/AION_freeze/embeddings/aion_embeddings"]="AION"
-BASELINE_MAP["${LOGS_BASE}/astropt_20260516_hybrid_cliploss/embeddings/best_img-mean_spec-rank_final_iso_j-mean/downstream_tasks_V1/downstream_results.csv"]="Hybrid (RAW)"
-BASELINE_MAP["${LOGS_BASE}/astropt_20260519_hybrid_filter/embeddings/best_img-mean_spec-rank_final_iso_j-mean_T2/downstream_tasks/downstream_results.csv"]="Hybrid + Filter"
-BASELINE_MAP["${LOGS_BASE}/astropt_20260601_hybrid_optimized/embeddings/best_img-mean_spec-rank_final_iso_j-mean/downstream_tasks/downstream_results.csv"]="Filter Optimized"
+#BASELINE_MAP["${LOGS_BASE}/AION_freeze/embeddings/aion_embeddings"]="AION"
+BASELINE_MAP["${LOGS_BASE}/astropt_20260605_original"]="AstroPT original"
+BASELINE_MAP["${LOGS_BASE}/astropt_20260601_hybrid_optimized/"]="AstroPT Hybrid optimized"
+BASELINE_MAP["${LOGS_BASE}/astropt_20260612_autoregresive_optimized/"]="AstroPT Autoregresive optimized"
 
 # Collect all paths and names for the comparative dashboard
 CSV_PATHS=()
 CSV_NAMES=()
 
 # 1. Add current run (priority)
-CURRENT_CSV=$(find "$EMB_DIR" -maxdepth 2 -type f -name "downstream_results.csv" | head -n 1)
-if [[ -n "$CURRENT_CSV" ]]; then
-    CURRENT_NAME=$(basename "$(echo "$EMB_DIR" | sed 's|/embeddings.*||')")
-    CSV_PATHS+=("$CURRENT_CSV")
-    CSV_NAMES+=("Current: $CURRENT_NAME")
+if [[ -n "$EMB_DIR" ]]; then
+    CURRENT_CSV=$(find "$EMB_DIR" -maxdepth 2 -type f -name "downstream_results.csv" | head -n 1 || true)
+    if [[ -n "$CURRENT_CSV" ]]; then
+        CURRENT_NAME=$(basename "$(echo "$EMB_DIR" | sed 's|/embeddings.*||')")
+        CSV_PATHS+=("$CURRENT_CSV")
+        CSV_NAMES+=("Current: $CURRENT_NAME")
+    fi
 fi
 
 # 2. Add baselines from dictionary
 for run_path in "${!BASELINE_MAP[@]}"; do
     # Skip if it's the same as current
-    if [[ "$run_path" == *"$EMB_DIR"* ]]; then continue; fi
+    if [[ -n "$EMB_DIR" && "$run_path" == *"$EMB_DIR"* ]]; then continue; fi
     
     # Find the best CSV for this baseline
     # Try downstream_results.csv directly, or search in embeddings

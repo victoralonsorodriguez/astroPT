@@ -76,12 +76,21 @@ done
 
 shift $((OPTIND - 1))
 
-# Validation: EMB_DIR is required ONLY in static mode
-if [[ "$INTERACTIVE_MODE" -eq 0 ]]; then
-    if [[ -z "${EMB_DIR:-}" ]]; then
-        echo "[ERROR]: EMB_DIR is required in static mode (-e <embeddings_dir>)"
-        exit 1
+if [[ -n "${EMB_DIR:-}" ]]; then
+    EMB_DIR=$(readlink -f "$EMB_DIR")
+    # Auto-resolve to subfolder if the provided directory does not contain predictions directly
+    if [[ ! -d "$EMB_DIR/downstream_tasks/predictions" ]]; then
+        SUBDIR=$(ls -td "${EMB_DIR}"/*/ 2>/dev/null | head -n 1)
+        if [[ -n "$SUBDIR" ]] && [[ -d "${SUBDIR}downstream_tasks/predictions" ]]; then
+            EMB_DIR="${SUBDIR%/}"
+        fi
     fi
+fi
+
+# Validation: EMB_DIR is required ONLY in static mode
+if [[ "$INTERACTIVE_MODE" -eq 0 ]] && [[ -z "${EMB_DIR:-}" ]]; then
+    echo "[ERROR]: EMB_DIR is required in static mode (-e <embeddings_dir>)"
+    exit 1
 fi
 
 #--- ENVIRONMENT SETUP ---#

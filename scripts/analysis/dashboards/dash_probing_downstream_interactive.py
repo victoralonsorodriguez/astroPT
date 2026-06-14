@@ -152,16 +152,31 @@ def load_data(selected_csvs: list, runs_dict: dict):
             
             def process_row(row):
                 mod = str(row['Modality'])
-                if '_phase1' in mod:
-                    row['Modality'] = mod.replace('_phase1', '')
-                    row['Test_Name'] = f"{name} (Phase 1)"
-                elif '_phase2' in mod:
-                    row['Modality'] = mod.replace('_phase2', '')
-                    row['Test_Name'] = f"{name} (Phase 2)"
-                elif has_phases and mod in ['EuclidImage', 'DESISpectrum', 'images', 'spectra', 'joint', 'cls', 'Joint', 'CLS']:
-                    row['Test_Name'] = f"{name} (Final)"
+                mod_lower = mod.lower()
+                if 'joint' in mod_lower:
+                    row['Modality'] = 'Joint'
+                    if 'phase1' in mod_lower:
+                        row['Test_Name'] = f"{name} (Joint Phase 1)"
+                    elif 'phase2' in mod_lower:
+                        row['Test_Name'] = f"{name} (Joint Phase 2)"
+                    elif 'concat' in mod_lower:
+                        row['Test_Name'] = f"{name} (Joint Concat)"
+                    else:
+                        row['Test_Name'] = f"{name} (Joint Mean)"
                 else:
-                    row['Test_Name'] = name
+                    if '_phase1' in mod:
+                        row['Modality'] = mod.replace('_phase1', '')
+                        row['Test_Name'] = f"{name} (Phase 1)"
+                    elif '_phase2' in mod:
+                        row['Modality'] = mod.replace('_phase2', '')
+                        row['Test_Name'] = f"{name} (Phase 2)"
+                    elif '_pooled' in mod:
+                        row['Modality'] = mod.replace('_pooled', '')
+                        row['Test_Name'] = f"{name} (Pooled)"
+                    elif has_phases and mod in ['EuclidImage', 'DESISpectrum', 'images', 'spectra', 'cls', 'CLS']:
+                        row['Test_Name'] = f"{name} (Pooled)"
+                    else:
+                        row['Test_Name'] = name
                 return row
 
             df = df.apply(process_row, axis=1)
@@ -312,14 +327,16 @@ def main():
     for p, n in zip(csv_paths_list, names_list):
         runs_dict[str(p)] = n
         
-    # Always scan logs base for additional runs to populate dropdown options
+    # Scan logs base for additional runs to populate dropdown options (optional)
     default_logs = "/home/valonso/iac18_mhuertas_shared/valonso/astroPT/logs"
     logs_dir = st.sidebar.text_input("Logs Directory for scanning", value=default_logs)
-    scanned_dict = scan_for_runs(logs_dir)
+    scan_logs = st.sidebar.checkbox("Scan Logs Directory for other runs", value=False)
     
-    for k, v in scanned_dict.items():
-        if k not in runs_dict:
-            runs_dict[k] = v
+    if scan_logs:
+        scanned_dict = scan_for_runs(logs_dir)
+        for k, v in scanned_dict.items():
+            if k not in runs_dict:
+                runs_dict[k] = v
 
     if not runs_dict:
         st.warning("No run tracking files found.")

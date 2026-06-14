@@ -9,7 +9,7 @@
 #SBATCH --cpus-per-task=16       
 #SBATCH --gpus-per-task=1        
 #SBATCH --mem=64G                
-#SBATCH --time=04:00:00         
+#SBATCH --time=06:00:00         
 
 #--- LOGS FILES ---#
 #SBATCH --output=logs/astropt_probing_%j.out
@@ -31,7 +31,7 @@ fi
 
 PYTHON_SCRIPT="$REPO_ROOT/scripts/probing/probing_downstream_benchmark.py"
 
-META_PATH="/home/valonso/iac18_aasensio_shared/euclid_dr1/catalog/catalog_MER_DR1_DESI_DR1_combined_wide_deep_v1.1.fits"
+META_PATH="/home/valonso/iac18_aasensio_shared/euclid_dr1/catalog/catalog_MER_DR1_DESI_DR1_combined_wide_deep_v1.1_FILTERED.fits"
 EPOCHS=50
 BATCH_SIZE=128
 LEARNING_RATE=1e-3
