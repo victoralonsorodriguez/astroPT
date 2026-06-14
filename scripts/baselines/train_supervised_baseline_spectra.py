@@ -28,10 +28,12 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 
-from astropt.euclid_desi_arrow_dataloader import EuclidDESIDatasetArrow
+from astropt.dataloader_multimodal import MultimodalDatasetArrow
+from astropt.processors import DESISpectrumProcessor
 from astropt.model import ModalityRegistry, ModalityConfig
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.metrics import r2_score, mean_squared_error, accuracy_score, f1_score, precision_score, recall_score, confusion_matrix
 from astropy.table import Table
 import warnings
@@ -56,8 +58,8 @@ class TrainingConfig:
     train_date: Optional[str] = None                       # Date of the training
     train_dir: Optional[str] = None                        # Training output directory
     seed: int = 42                                         # Random seed
-    metadata_path: str = "/home/valonso/iac18_aasensio_shared/euclid_dr1/test_catalog_cleaned.fits"
-    data_dir: str = "/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow"
+    metadata_path: str = "/home/valonso/iac18_aasensio_shared/euclid_dr1/catalog/catalog_MER_DR1_DESI_DR1_combined_wide_deep_v1.1_FILTERED.fits"
+    data_dir: str = "/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated"
     
     #--- Model Architecture ---#
     seq_len_in: int = 7781          # Input sequence length (DESI spectra)
@@ -75,13 +77,13 @@ class TrainingConfig:
     #--- Hyperparameters (AstroPT Aligned) ---#
     max_iters: int = 75000                                 # Total training iters
     init_from: str = "scratch"                             # "scratch" or "resume"
-    learning_rate: float = 1e-4                            # Max Learning rate
-    lr_min: float = 1e-5                                   # Min Learning rate
-    lr_warmup_iters: int = 4000                            # Warmup steps
-    lr_decay_iters: int = 65000                            # Decay steps
-    weight_decay: float = 1e-2                             # Weight decay
+    learning_rate: float = 3e-4                            # Max Learning rate
+    lr_min: float = 3e-5                                   # Min Learning rate
+    lr_warmup_iters: int = 5000                            # Warmup steps
+    lr_decay_iters: int = 70000                            # Decay steps
+    weight_decay: float = 0.1                              # Weight decay
     beta1: float = 0.9                                     # AdamW parameter
-    beta2: float = 0.95                                    # AdamW parameter
+    beta2: float = 0.98                                    # AdamW parameter
     
     #--- Spectra Processing ---#
     spectra_norm_type: str = "asinh"
@@ -90,11 +92,11 @@ class TrainingConfig:
     
     #--- Logging & Checkpointing ---#
     eval_interval: int = 1000                               # How often to evaluate
-    eval_batches: int = 100                                 # How many batches for evaluation
+    eval_batches: int = 200                                 # How many batches for evaluation
     log_interval: int = 200                                 # Console/CSV log interval
     checkpoint_interval: int = 1000                         # How often to save model weights
-    early_stop_patience: int = 10                           # Limits iterations without validation loss improvement
-    early_stopping_min_iters: int = 35000                   # Minimum iterations before starting to count patience
+    early_stop_patience: int = 15                           # Limits iterations without validation loss improvement
+    early_stopping_min_iters: int = 50000                   # Minimum iterations before starting to count patience
     
     #--- System ---#
     max_run_hours: Optional[str] = None                    # Time limit ("HH:MM:SS")
@@ -243,6 +245,16 @@ class SpectraSupervisedBaseline(nn.Module):
         x = x.mean(dim=1)
         out = self.head(x)
         return out
+class AsinhScaler(BaseEstimator, TransformerMixin):
+    """
+    Inverse hyperbolic sine scaler.
+    Useful for heavy-tailed distributions like astronomical fluxes.
+    """
+    def __init__(self, a: float = 1.0):
+        self.a = a 
+    def fit(self, X: Any, y: Any = None) -> 'AsinhScaler': return self
+    def transform(self, X: np.ndarray) -> np.ndarray: return np.arcsinh(X / self.a)
+    def inverse_transform(self, X: np.ndarray) -> np.ndarray: return self.a * np.sinh(X)
 
 class FilteredAstroDataset(Dataset):
     def __init__(self, base_dataset, target_dict, valid_indices):
@@ -390,7 +402,11 @@ def main():
     # Setup target scaling / encoding
     if task_type == 'regression':
         y_vals = filtered_cat[config.target].values.astype(np.float32)
-        scaler_y = StandardScaler()
+        is_flux = "flux" in config.target.lower()
+        if is_flux:
+            scaler_y = AsinhScaler(a=1.0)
+        else:
+            scaler_y = StandardScaler()
         y_scaled = scaler_y.fit_transform(y_vals.reshape(-1, 1)).flatten()
         output_dim = 1
     else:
@@ -413,57 +429,78 @@ def main():
         encoder_type="discrete"
     )])
     
-    tf_kwargs = {
-        'norm_type_spec': config.spectra_norm_type,
-        'norm_scaler_spec': config.spectra_norm_scaler,
-        'norm_const_spec': config.spectra_norm_const
+    # Configure processors
+    train_processors = {
+        "spectra": DESISpectrumProcessor(
+            stochastic=False,
+            inverse=False
+        )
     }
     
-    train_tf = EuclidDESIDatasetArrow.data_transforms(stage='train', **tf_kwargs)
-    val_tf = EuclidDESIDatasetArrow.data_transforms(stage='val', **tf_kwargs)
+    val_processors = {
+        "spectra": DESISpectrumProcessor(
+            stochastic=False,
+            inverse=False
+        )
+    }
     
-    base_ds_train = EuclidDESIDatasetArrow(
+    tf_kwargs = {
+        'norm_type_spectra': config.spectra_norm_type,
+        'norm_scaler_spectra': config.spectra_norm_scaler,
+        'norm_const_spectra': config.spectra_norm_const
+    }
+    
+    train_tf = MultimodalDatasetArrow.data_transforms(stage='train', **tf_kwargs)
+    val_tf = MultimodalDatasetArrow.data_transforms(stage='val', **tf_kwargs)
+    
+    base_ds_train = MultimodalDatasetArrow(
         arrow_folder_root=config.data_dir,
-        split="train",
+        split="test",
+        processors=train_processors,
         modality_registry=registry,
-        spiral=config.spiral,
         transform=train_tf
     )
     
-    base_ds_val = EuclidDESIDatasetArrow(
+    base_ds_val = MultimodalDatasetArrow(
         arrow_folder_root=config.data_dir,
         split="test",
+        processors=val_processors,
         modality_registry=registry,
-        spiral=config.spiral,
         transform=val_tf
     )
     
-    logger.info("Aligning Arrow dataset with filtered catalog...")
-    train_valid_indices = []
-    for i in tqdm(range(len(base_ds_train)), desc="Scanning Train Target IDs"):
-        try:
-            item = base_ds_train.ds[i]
-            tid = int(item['targetid'])
-            if tid in target_dict:
-                train_valid_indices.append(i)
-        except Exception:
-            continue
-
-    val_valid_indices = []
-    for i in tqdm(range(len(base_ds_val)), desc="Scanning Val Target IDs"):
+    logger.info("Aligning Arrow dataset split='test' with filtered catalog...")
+    valid_indices = []
+    for i in tqdm(range(len(base_ds_val)), desc="Scanning Target IDs"):
         try:
             item = base_ds_val.ds[i]
             tid = int(item['targetid'])
             if tid in target_dict:
-                val_valid_indices.append(i)
+                valid_indices.append(i)
         except Exception:
             continue
-            
-    logger.info(f"Found {len(train_valid_indices)} Train & {len(val_valid_indices)} Val matched samples for {config.target}.")
-    if len(train_valid_indices) == 0 or len(val_valid_indices) == 0:
-        logger.error("No matches found for train or val. Exiting.")
+
+    if len(valid_indices) == 0:
+        logger.error("No matches found. Exiting.")
         sys.exit(1)
-        
+
+    y_stratify = []
+    for idx in valid_indices:
+        item = base_ds_val.ds[idx]
+        tid = int(item['targetid'])
+        y_stratify.append(target_dict[tid])
+    y_stratify = np.array(y_stratify)
+
+    stratify_labels = y_stratify if task_type == 'classification' and len(np.unique(y_stratify)) > 1 else None
+    train_valid_indices, val_valid_indices = train_test_split(
+        valid_indices,
+        test_size=0.2,
+        random_state=42,
+        stratify=stratify_labels
+    )
+            
+    logger.info(f"Split test set (size {len(valid_indices)}): Found {len(train_valid_indices)} Train & {len(val_valid_indices)} Val matched samples for {config.target}.")
+    
     train_ds = FilteredAstroDataset(base_ds_train, target_dict, train_valid_indices)
     test_ds = FilteredAstroDataset(base_ds_val, target_dict, val_valid_indices)
     

@@ -12,7 +12,7 @@
 #SBATCH --time=10:00:00         
 #SBATCH --output=logs/resnet_base_%A_%a.out
 #SBATCH --error=logs/resnet_base_%A_%a.err
-#SBATCH --array=0-3
+#SBATCH --array=0-19
 
 set -euo pipefail
 
@@ -37,25 +37,26 @@ SAVE_DIR="$REPO_ROOT/logs/supervised_baseline_images_FILTERED"
 
 # Targets List
 TARGETS=(
-    #"Z" 
-    #"LOGMSTAR"
-    #"LOGSFR"
-    #"GR" 
+    "Z" 
+    "LOGMSTAR"
+    "LOGSFR"
+    "GR" 
     'flux_detection_total'
     'HALPHA_EW'
     'HALPHA_FLUX'
     'NII_6584_FLUX'
-    #'OIII_5007_FLUX'
-    #'HBETA_FLUX'
-    #'sersic_sersic_vis_radius'
-    #'sersic_sersic_vis_index'
-    #'sersic_sersic_vis_axis_ratio'
-    #'has_spiral_arms_yes'
-    #'smoothness'
-    #'smooth_or_featured_smooth'
-    #'gini'
-    #'SPECTYPE'
-    #'data_set_release'
+    'OIII_5007_FLUX'
+    'OIII_5007_SIGMA'
+    'HBETA_FLUX'
+    'sersic_sersic_vis_radius'
+    'sersic_sersic_vis_index'
+    'sersic_sersic_vis_axis_ratio'
+    'has_spiral_arms_yes'
+    'smoothness'
+    'smooth_or_featured_smooth'
+    'gini'
+    'SPECTYPE'
+    'data_set_release'
 )
 
 # Get current target from array task id (defauls to 0 if run locally)
