@@ -24,7 +24,11 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 
 # If SLURM has moved us to /var/spool, correct REPO_ROOT to the launch working directory
 if [[ "$REPO_ROOT" == "/var/spool"* ]]; then
-    REPO_ROOT="$PWD"
+    if [ -d "$PWD/astroPT" ]; then
+        REPO_ROOT="$PWD/astroPT"
+    else
+        REPO_ROOT="$PWD"
+    fi
 fi
 
 PYTHON_SCRIPT="$REPO_ROOT/scripts/inference/embeddings_extraction.py"
@@ -79,7 +83,7 @@ DATA_DIR=$(readlink -f "$DATA_DIR")
 NOW=$(date "+[%Y-%m-%d - %H:%M:%S]")
 
 echo "-----------------------------------------------"
-echo "Starting Embedding Extraction Job $SLURM_JOB_ID - $NOW"
+echo "Starting Embedding Extraction Job ${SLURM_JOB_ID:-local} - $NOW"
 echo "-----------------------------------------------"
 
 # 1. Change directory

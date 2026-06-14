@@ -100,9 +100,15 @@ def apply_pooling(tensor: torch.Tensor,
     elif method == 'lp':
         return (torch.mean(tensor.abs()**p_value, dim=1))**(1.0 / p_value)
     elif method == 'rank':
-        sorted_tensor, _ = torch.sort(tensor, dim=1, descending=True)
-        k = max(1, int(sorted_tensor.size(1) * 0.1))
-        return sorted_tensor[:, :k, :].mean(dim=1)
+        # Select tokens by their vector norms to preserve feature alignment across channels
+        norms = torch.norm(tensor, p=2, dim=2)  # (B, L)
+        _, indices = torch.sort(norms, dim=1, descending=True)  # (B, L)
+        k = max(1, int(tensor.size(1) * 0.1))
+        top_k_indices = indices[:, :k]  # (B, k)
+        # Expand indices to (B, k, D) to gather along dim=1
+        gather_indices = top_k_indices.unsqueeze(-1).expand(-1, -1, tensor.size(-1))
+        top_tokens = torch.gather(tensor, dim=1, index=gather_indices)  # (B, k, D)
+        return top_tokens.mean(dim=1)
     else:
         raise ValueError(f"Invalid pooling method '{method}'.")
 
@@ -220,7 +226,8 @@ def main():
         canonical_mods.append('cls')
     
     for mod in canonical_mods:
-        mmaps[mod] = np.lib.format.open_memmap(save_path / f'{mod}.npy', mode='w+', dtype='float32', shape=(total_samples, emb_dim))
+        mmap_name = f"{mod}_pooled" if mod in active_modalities else mod
+        mmaps[mmap_name] = np.lib.format.open_memmap(save_path / f'{mmap_name}.npy', mode='w+', dtype='float32', shape=(total_samples, emb_dim))
     
     # Define amp autocast context for bfloat16 compatibility
     ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16) if device.type == "cuda" else nullcontext()
@@ -236,7 +243,14 @@ def main():
         mmaps[ek] = np.lib.format.open_memmap(save_path / f'{ek}.npy', mode='w+', dtype='float32', shape=(total_samples, emb_dim))
 
     if is_multimodal and not args.only_cls:
-        mmaps['joint'] = np.lib.format.open_memmap(save_path / 'joint.npy', mode='w+', dtype='float32', shape=(total_samples, emb_dim))
+        mmaps['joint_mean'] = np.lib.format.open_memmap(save_path / 'joint_mean.npy', mode='w+', dtype='float32', shape=(total_samples, emb_dim))
+        mmaps['joint_concat'] = np.lib.format.open_memmap(save_path / 'joint_concat.npy', mode='w+', dtype='float32', shape=(total_samples, 2 * emb_dim))
+        has_phase1 = any("_phase1" in k for k in expert_keys)
+        has_phase2 = any("_phase2" in k for k in expert_keys)
+        if has_phase1:
+            mmaps['joint_phase1'] = np.lib.format.open_memmap(save_path / 'joint_phase1.npy', mode='w+', dtype='float32', shape=(total_samples, emb_dim))
+        if has_phase2:
+            mmaps['joint_phase2'] = np.lib.format.open_memmap(save_path / 'joint_phase2.npy', mode='w+', dtype='float32', shape=(total_samples, emb_dim))
 
     # 4. Extraction Loop
     start_idx = 0
@@ -256,17 +270,39 @@ def main():
 
             embeddings = {}
             if is_multimodal and args.order_mode == "isolated":
-                # Isolated pass per modality to prevent cross-contamination
+                # 1. Isolated pass per modality to prevent cross-contamination for unimodal embeddings
                 for mod in active_modalities:
                     isolated_X = {mod: B["X"][mod], f"{mod}_positions": B["X"][f"{mod}_positions"]}
                     emb = model.get_embeddings(isolated_X, draw_from_centre=args.draw_from_centre)
                     embeddings[mod] = emb[mod]
-                    if has_cls and 'cls' in emb:
-                        embeddings['cls'] = emb['cls'] # CLS will be from the last pass, or we could average
                     # Copy phase and expert embeddings if present in this isolated pass
                     for k, v in emb.items():
                         if "_expert" in k or "_phase" in k:
                             embeddings[k] = v
+                
+                # 2. Run a joint forward pass to get the true joint CLS and joint representations
+                joint_emb = model.get_embeddings(B["X"], draw_from_centre=args.draw_from_centre)
+                if has_cls and 'cls' in joint_emb:
+                    embeddings['cls'] = joint_emb['cls']
+                
+                # We can also compute the joint embedding from this joint pass
+                pooled_joint_list = []
+                for mod in active_modalities:
+                    if mod in joint_emb:
+                        method = args.pool_method_img if "Image" in mod else args.pool_method_spec
+                        pooled_joint_list.append(apply_pooling(joint_emb[mod], method=method, cls_token=embeddings.get('cls')))
+                
+                if len(pooled_joint_list) >= 2:
+                    if args.joint_mode == "l2mean":
+                        joint_repr = (F.normalize(pooled_joint_list[0], p=2, dim=1) + F.normalize(pooled_joint_list[1], p=2, dim=1)) / 2.0
+                    elif args.joint_mode == "weighted":
+                        joint_repr = args.joint_alpha * pooled_joint_list[0] + (1.0 - args.joint_alpha) * pooled_joint_list[1]
+                    else:
+                        joint_repr = sum(pooled_joint_list) / len(pooled_joint_list)
+                    embeddings['joint_from_pass'] = joint_repr
+                    
+                    joint_concat_repr = torch.cat(pooled_joint_list, dim=1)
+                    embeddings['joint_concat_from_pass'] = joint_concat_repr
             else:
                 # Standard forward
                 embeddings = model.get_embeddings(B["X"], draw_from_centre=args.draw_from_centre)
@@ -280,29 +316,54 @@ def main():
                     method = args.pool_method_img if "Image" in mod else args.pool_method_spec
                     p = apply_pooling(embeddings[mod], method=method, cls_token=cls_token)
                     pooled[mod] = p
-                    if mod in mmaps:
-                        mmaps[mod][start_idx:end_idx] = p.float().cpu().numpy()
+                    mmap_name = f"{mod}_pooled"
+                    if mmap_name in mmaps:
+                        mmaps[mmap_name][start_idx:end_idx] = p.float().cpu().numpy()
 
             # Expert tokens storage (Direct access, no pooling needed)
             for ek in expert_keys:
                 if ek in embeddings:
                     mmaps[ek][start_idx:end_idx] = embeddings[ek].squeeze(1).float().cpu().numpy()
 
+            # Joint phase embeddings (V4 experts averages)
+            if is_multimodal:
+                p1_embs = [embeddings[k] for k in embeddings if "_phase1" in k]
+                if len(p1_embs) >= 2 and 'joint_phase1' in mmaps:
+                    joint_p1 = sum(p1_embs) / len(p1_embs)
+                    mmaps['joint_phase1'][start_idx:end_idx] = joint_p1.squeeze(1).float().cpu().numpy()
+                
+                p2_embs = [embeddings[k] for k in embeddings if "_phase2" in k]
+                if len(p2_embs) >= 2 and 'joint_phase2' in mmaps:
+                    joint_p2 = sum(p2_embs) / len(p2_embs)
+                    mmaps['joint_phase2'][start_idx:end_idx] = joint_p2.squeeze(1).float().cpu().numpy()
+
             if cls_token is not None and 'cls' in mmaps:
                 mmaps['cls'][start_idx:end_idx] = cls_token.squeeze(1).float().cpu().numpy()
 
             # Joint embedding
-            if is_multimodal and 'joint' in mmaps:
-                # Assume 2 modalities for simplicity in fusion, but could be N
-                p_list = [pooled[m] for m in active_modalities if m in pooled]
-                if len(p_list) >= 2:
-                    if args.joint_mode == "l2mean":
-                        joint = (F.normalize(p_list[0], p=2, dim=1) + F.normalize(p_list[1], p=2, dim=1)) / 2.0
-                    elif args.joint_mode == "weighted":
-                        joint = args.joint_alpha * p_list[0] + (1.0 - args.joint_alpha) * p_list[1]
-                    else:
-                        joint = sum(p_list) / len(p_list)
-                    mmaps['joint'][start_idx:end_idx] = joint.float().cpu().numpy()
+            if is_multimodal and 'joint_mean' in mmaps:
+                if 'joint_from_pass' in embeddings:
+                    mmaps['joint_mean'][start_idx:end_idx] = embeddings['joint_from_pass'].float().cpu().numpy()
+                else:
+                    p_list = [pooled[m] for m in active_modalities if m in pooled]
+                    if len(p_list) >= 2:
+                        if args.joint_mode == "l2mean":
+                            joint = (F.normalize(p_list[0], p=2, dim=1) + F.normalize(p_list[1], p=2, dim=1)) / 2.0
+                        elif args.joint_mode == "weighted":
+                            joint = args.joint_alpha * p_list[0] + (1.0 - args.joint_alpha) * p_list[1]
+                        else:
+                            joint = sum(p_list) / len(p_list)
+                        mmaps['joint_mean'][start_idx:end_idx] = joint.float().cpu().numpy()
+            
+            # Joint Concat embedding
+            if is_multimodal and 'joint_concat' in mmaps:
+                if 'joint_concat_from_pass' in embeddings:
+                    mmaps['joint_concat'][start_idx:end_idx] = embeddings['joint_concat_from_pass'].float().cpu().numpy()
+                else:
+                    p_list = [pooled[m] for m in active_modalities if m in pooled]
+                    if len(p_list) >= 2:
+                        joint_concat = torch.cat(p_list, dim=1)
+                        mmaps['joint_concat'][start_idx:end_idx] = joint_concat.float().cpu().numpy()
 
             start_idx = end_idx
 
