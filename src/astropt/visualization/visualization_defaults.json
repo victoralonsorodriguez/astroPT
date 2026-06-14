@@ -1,0 +1,56 @@
+{
+    "spectral_lines": [
+        {"name": "Ly$\\alpha$", "wavelength": 1216.0},
+        {"name": "C IV", "wavelength": 1549.0},
+        {"name": "C III", "wavelength": 1908.7},
+        {"name": "Mg II", "wavelength": 2798.0},
+        {"name": "[O II]", "wavelength": 3727.3},
+        {"name": "[Ne III]", "wavelength": 3868.7},
+        {"name": "Ca K", "wavelength": 3933.7},
+        {"name": "Ca H", "wavelength": 3968.5},
+        {"name": "H$\\delta$", "wavelength": 4102.0},
+        {"name": "H$\\gamma$", "wavelength": 4341.0},
+        {"name": "H$\\beta$", "wavelength": 4861.0},
+        {"name": "[O III]", "wavelength": 4959.0},
+        {"name": "[O III]", "wavelength": 5007.0},
+        {"name": "Mg I", "wavelength": 5175.0},
+        {"name": "Na D", "wavelength": 5890.0},
+        {"name": "[N II]", "wavelength": 6548.0},
+        {"name": "H$\\alpha$", "wavelength": 6563.0},
+        {"name": "[N II]", "wavelength": 6583.5},
+        {"name": "[S II]", "wavelength": 6730.8}
+    ],
+    "matplotlib": {
+        "usetex": true,
+        "font_family": "serif",
+        "font_weight": "bold",
+        "font_size": 14,
+        "axes_labelsize": 17,
+        "axes_titlesize": 19,
+        "xtick_labelsize": 15,
+        "ytick_labelsize": 15,
+        "legend_fontsize": 14,
+        "axes_grid": true,
+        "grid_alpha": 0.3,
+        "lines_linewidth": 2,
+        "axes_labelweight": "bold",
+        "axes_titleweight": "bold",
+        "figure_titlesize": 22,
+        "figure_titleweight": "bold"
+    },
+    "rgb": {
+        "weights": [1.2, 1.3, 1.0],
+        "lupton_Q": 12.0,
+        "lupton_stretch": 0.5,
+        "background_percentile": 50,
+        "channel_clip_percentile": 99.5
+    },
+    "spectral_line_annotation": {
+        "color": "royalblue",
+        "linestyle": "--",
+        "line_alpha": 0.6,
+        "line_width": 1,
+        "fontsize": 12,
+        "font_alpha": 1.0
+    }
+}
