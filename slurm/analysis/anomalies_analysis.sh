@@ -51,6 +51,9 @@ while getopts ":r:w:s:e:f:a:n:m:" opt; do
   esac
 done
 
+# Change to repo root first so that relative paths resolve correctly
+cd "$REPO_ROOT" || { echo "[ERROR]: Cannot find REPO_ROOT: $REPO_ROOT"; exit 1; }
+
 if [ -z "$WEIGHTS_DIR" ] || [ -z "$EMB_DIR" ]; then
   echo "[ERROR]: WEIGHTS_DIR and EMB_DIR are required"
   echo "Usage: $0 -w <weights_dir> -e <embeddings_dir_or_root> [-s save_dir] [-a data_dir] [-f metadata_path] [-n n_anomalies] [-m base_modality]"
@@ -91,9 +94,8 @@ echo "--------------------------------------------------------"
 echo "Starting AstroPT Multimodal Anomaly Hunter Job $SLURM_JOB_ID - $NOW"
 echo "--------------------------------------------------------"
 
-# 1. Change directory
-echo "Changing directory to: $REPO_ROOT"
-cd "$REPO_ROOT" || { echo "[ERROR]: Cannot find REPO_ROOT: $REPO_ROOT"; exit 1; }
+# 1. Already changed directory
+echo "Working directory is: $PWD"
 
 # 2. Activate Environment
 source "$REPO_ROOT/.venv/bin/activate"

@@ -46,6 +46,7 @@ from sklearn.neighbors import LocalOutlierFactor, NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 from sklearn.covariance import LedoitWolf
 from sklearn.manifold import TSNE
+from sklearn.cluster import DBSCAN
 
 from astropt.dataloader_multimodal import MultimodalDatasetArrow
 from astropt.training_utils import create_dataloaders
@@ -78,6 +79,8 @@ def parse_args() -> argparse.Namespace:
     
     parser.add_argument("--n_anomalies", type=int, default=10, 
                         help="Number of top anomalies to extract and plot")
+    parser.add_argument("--n_candidates", type=int, default=1000, 
+                        help="Number of top UWI outliers to audit for artifact classification")
     parser.add_argument("--batch_size", type=int, default=16, 
                         help="Batch size for dataloader")
     parser.add_argument("--contamination", type=float, default=0.01,  
@@ -95,8 +98,115 @@ def parse_args() -> argparse.Namespace:
                         help="Base embedding modality for general outlier detectors, or 'all' to run on all available modalities dynamically.")
     parser.add_argument("--plot_projection", action="store_true", default=True,
                         help="Generate a 2D t-SNE plot highlighting anomaly locations")
+    parser.add_argument("--anchor_ids", type=int, nargs="+", default=None,
+                        help="Optional TargetIDs of reference anchors for few-shot cosine similarity detection")
+    parser.add_argument("--similarity_threshold", type=float, default=0.85,
+                        help="Cosine similarity threshold for matching reference anchors")
     
     return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Artifact Classification Engine
+# ---------------------------------------------------------------------------
+
+def classify_artifacts_by_embeddings(
+    df_scores: pd.DataFrame,
+    X_base: np.ndarray,
+    active_ids_unsorted: np.ndarray,
+    anchor_ids: Optional[List[int]] = None,
+    threshold: float = 0.85,
+    eps: float = 0.15,
+    min_samples: int = 3
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Classifies outliers using purely embedding-space logic (Method 1 or Method 2).
+    
+    Returns:
+        is_artifact_col: boolean array indicating if each source is an artifact
+        artifact_reasons_col: string array explaining why
+    """
+    n_samples = len(df_scores)
+    is_artifact_col = np.full(n_samples, False)
+    artifact_reasons_col = np.full(n_samples, "Clean", dtype=object)
+
+    ids_int = active_ids_unsorted.astype(int)
+    
+    # Normalize embeddings to unit L2 length
+    X_norm = X_base / np.maximum(np.linalg.norm(X_base, axis=1, keepdims=True), 1e-10)
+
+    if anchor_ids:
+        logger.info(f"Using Method 2: Few-Shot Cosine Similarity with {len(anchor_ids)} anchors...")
+        anchor_embeds = []
+        resolved_anchor_ids = []
+        for aid in anchor_ids:
+            idx_list = np.where(ids_int == int(aid))[0]
+            if len(idx_list) > 0:
+                anchor_embeds.append(X_norm[idx_list[0]])
+                resolved_anchor_ids.append(aid)
+            else:
+                logger.warning(f"Anchor TargetID {aid} not found in the dataset embeddings.")
+        
+        if not anchor_embeds:
+            logger.error("None of the specified anchor IDs were found in the dataset! Falling back to Method 1 (DBSCAN).")
+            anchor_ids = None
+        else:
+            anchor_matrix = np.stack(anchor_embeds)
+            cos_sims = np.dot(X_norm, anchor_matrix.T)
+            max_sims = cos_sims.max(axis=1)
+            best_anchor_indices = cos_sims.argmax(axis=1)
+            
+            for idx in range(n_samples):
+                tid = int(df_scores.iloc[idx]["TargetID"])
+                matches = np.where(ids_int == tid)[0]
+                if len(matches) == 0:
+                    continue
+                m_idx = matches[0]
+                sim = max_sims[m_idx]
+                if sim >= threshold:
+                    matched_aid = resolved_anchor_ids[best_anchor_indices[m_idx]]
+                    is_artifact_col[idx] = True
+                    artifact_reasons_col[idx] = f"Anchor Similarity: matched {matched_aid} (sim={sim:.3f})"
+            return is_artifact_col, artifact_reasons_col
+
+    if not anchor_ids:
+        logger.info("Using Method 1: DBSCAN Outlier Clustering...")
+        candidate_tids = df_scores["TargetID"].values
+        
+        candidate_indices = []
+        valid_candidate_tids = []
+        for tid in candidate_tids:
+            matches = np.where(ids_int == int(tid))[0]
+            if len(matches) > 0:
+                candidate_indices.append(matches[0])
+                valid_candidate_tids.append(tid)
+        
+        candidate_indices = np.array(candidate_indices)
+        
+        if len(candidate_indices) > 0:
+            X_cand = X_norm[candidate_indices]
+            db = DBSCAN(eps=eps, min_samples=min_samples, metric='cosine')
+            labels = db.fit_predict(X_cand)
+            
+            artifact_tids_set = set()
+            tid_to_label = {}
+            for tid, label in zip(valid_candidate_tids, labels):
+                if label >= 0:
+                    artifact_tids_set.add(tid)
+                    tid_to_label[tid] = label
+            
+            for idx in range(n_samples):
+                tid = int(df_scores.iloc[idx]["TargetID"])
+                if tid in artifact_tids_set:
+                    is_artifact_col[idx] = True
+                    artifact_reasons_col[idx] = f"Clustered Artifact: DBSCAN cluster {tid_to_label[tid]}"
+                else:
+                    if tid in valid_candidate_tids:
+                        artifact_reasons_col[idx] = "Clean (DBSCAN Outlier/Noise)"
+                    else:
+                        artifact_reasons_col[idx] = "Not Audited (Below threshold)"
+                        
+    return is_artifact_col, artifact_reasons_col
 
 
 # ---------------------------------------------------------------------------
@@ -917,6 +1027,8 @@ def main():
         logger.info(f"Processing single specified base modality: {modalities_to_process}")
         
     # 4. Loop over and process each modality
+    ds_ids = np.array(ds.ds['targetid'])
+    
     for modality in modalities_to_process:
         logger.info(f"\n==================================================")
         logger.info(f"=== RUNNING ANOMALY HUNTER ON MODALITY: {modality} ===")
@@ -933,34 +1045,64 @@ def main():
             allowed_ids_filter=allowed_ids
         )
         
+        # Align indices of embeddings correctly using the unsorted active IDs list
+        all_ids_raw = np.load(embeddings_dir / "ids.npy")
+        if allowed_ids is not None:
+            active_ids_unsorted = all_ids_raw[np.isin(all_ids_raw.astype(int), list(allowed_ids))]
+        else:
+            active_ids_unsorted = all_ids_raw
+            
+        # ---------------------------------------------------------------
+        # 4b. Pure Embedding-Based Artifact Detection
+        # ---------------------------------------------------------------
+        is_artifact_col, artifact_reasons_col = classify_artifacts_by_embeddings(
+            df_scores=df_scores,
+            X_base=feature_matrices[modality],
+            active_ids_unsorted=active_ids_unsorted,
+            anchor_ids=args.anchor_ids,
+            threshold=args.similarity_threshold,
+            eps=0.15,
+            min_samples=3
+        )
+        
+        df_scores["Is_Artifact"] = is_artifact_col
+        df_scores["Artifact_Reasons"] = artifact_reasons_col
+        df_scores["Zero_Pixel_Fraction"] = np.nan
+        df_scores["Sharp_Edge_Score"] = np.nan
+        
+        n_artifacts_found = int(np.sum(is_artifact_col))
+        logger.info(f"Artifact detection complete: found {n_artifacts_found} artifacts.")
+        
         # Save the consolidated CSV catalog of anomaly rankings for this modality
         csv_path = save_dir / f"consolidated_anomalies_{modality}.csv"
         df_scores.to_csv(csv_path, index=False)
         logger.info(f"Saved anomaly scores catalog for {modality} to {csv_path}")
         
-        # Extract top N anomalies for deep report profiling
-        df_top = df_scores.head(args.n_anomalies)
+        # ---------------------------------------------------------------
+        # 5. Extract top N PHYSICAL anomalies (filtering out artifacts)
+        # ---------------------------------------------------------------
+        df_physical = df_scores[df_scores["Is_Artifact"] == False]
+        df_top_physical = df_physical.head(args.n_anomalies)
+        logger.info(f"Selected top {len(df_top_physical)} physical anomalies (excluding {n_artifacts_found} artifacts).")
         
-        # 5. Generate Reports and Plots for this modality
+        # 6. Generate Reports and Plots for this modality
         if args.plot_projection:
             X_base = feature_matrices[modality]
-            # Match Top anomalies IDs back to their index in the active ids array
-            all_ids = df_scores.TargetID.values
-            top_tids = df_top.TargetID.values
-            top_indices = np.array([np.where(all_ids == tid)[0][0] for tid in top_tids])
+            top_tids = df_top_physical.TargetID.values
+            top_indices = np.array([np.where(active_ids_unsorted == tid)[0][0] for tid in top_tids if tid in active_ids_unsorted])
             
             tsne_path = save_dir / f"latent_tsne_{modality}.png"
             generate_tSNE_plot(
                 X_base, 
                 top_indices=top_indices, 
-                uwi_scores=df_top.Unified_Weirdness_Index.values, 
+                uwi_scores=df_top_physical.Unified_Weirdness_Index.values[:len(top_indices)], 
                 save_path=tsne_path
             )
             
         dashboard_pdf_path = save_dir / f"anomaly_hunter_report_{modality}.pdf"
         generate_anomaly_report_dashboard(
             ds=ds,
-            df_top=df_top,
+            df_top=df_top_physical,
             fits_catalog=fits_df,
             save_path=dashboard_pdf_path
         )

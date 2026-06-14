@@ -9,14 +9,14 @@
 #SBATCH --cpus-per-task=16       
 #SBATCH --gpus-per-task=1        
 #SBATCH --mem=64G                
-#SBATCH --time=02:00:00         
+#SBATCH --time=01:00:00         
 
 #--- LOGS FILES ---#
 #SBATCH --output=logs/astropt_audit_%j.out
 #SBATCH --error=logs/astropt_audit_%j.err
 
 echo "--------------------------------------------------------"
-echo "AstroPT Dataset Observational Quality Audit (SLURM)"
+echo "AstroPT Embedding-Based Artifact Detection (SLURM)"
 echo "--------------------------------------------------------"
 echo "Job ID: $SLURM_JOB_ID"
 echo "Running on node: $SLURMD_NODENAME"
@@ -51,82 +51,118 @@ else
     echo "[WARNING] Virtual environment not found at $VENV_PATH. Using system python."
 fi
 
+# Activating LaTeX (Required for high-quality astrophysical plots & reports)
+export PATH="$HOME/.TinyTeX/bin/x86_64-linux:$PATH"
+export MPLCONFIGDIR="/home/valonso/iac18_mhuertas_shared/valonso/cache/matplotlib"
+export XDG_CACHE_HOME="/home/valonso/iac18_mhuertas_shared/valonso/cache"
+
 # Default Paths
-CKPT_PATH="logs/astropt_20260601_hybrid_optimized/weights/ckpt_best.pt"
-WEIGHTS_DIR=""
-EMB_DIR=""
 DATA_DIR="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow"
 META_PATH="/home/valonso/iac18_aasensio_shared/euclid_dr1/catalog/catalog_MER_DR1_DESI_DR1_combined_wide_deep_v1.1_FILTERED.fits"
-N_SAMPLES=5000  # Audit 5000 random/sequential samples by default to get super-fast results
-SPLIT="both"    # Audit both splits by default
+N_CANDIDATES=1000
+N_PLOT=30
+BASE_MODALITY="EuclidImage"
+WEIGHTS_DIR=""
+EMB_DIR=""
+SAVE_DIR=""
 
-# Parse arguments to override defaults if desired
-while getopts ":w:e:d:m:n:p:" opt; do
+#--- ARGUMENT PARSING (FLAGS) ---#
+while getopts ":w:e:s:d:m:n:p:b:" opt; do
   case $opt in
     w) WEIGHTS_DIR="$OPTARG" ;;
     e) EMB_DIR="$OPTARG" ;;
+    s) SAVE_DIR="$OPTARG" ;;
     d) DATA_DIR="$OPTARG" ;;
     m) META_PATH="$OPTARG" ;;
-    n) N_SAMPLES="$OPTARG" ;;
-    p) SPLIT="$OPTARG" ;;
+    n) N_CANDIDATES="$OPTARG" ;;
+    p) N_PLOT="$OPTARG" ;;
+    b) BASE_MODALITY="$OPTARG" ;;
     \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
   esac
 done
 
+if [ -z "$WEIGHTS_DIR" ] || [ -z "$EMB_DIR" ]; then
+  echo "[ERROR]: WEIGHTS_DIR (-w) and EMB_DIR (-e) are required"
+  echo "Usage: $0 -w <weights_dir> -e <embeddings_dir> [-s save_dir] [-d data_dir] [-m metadata_path] [-n n_candidates] [-p n_plot] [-b base_modality]"
+  exit 1
+fi
+
 # Resolve Checkpoint Path from Weights (file or directory)
-if [ -n "$WEIGHTS_DIR" ]; then
-    WEIGHTS_DIR=$(readlink -f "$WEIGHTS_DIR")
-    if [ -f "$WEIGHTS_DIR" ]; then
-        CKPT_PATH="$WEIGHTS_DIR"
-    elif [ -d "$WEIGHTS_DIR" ]; then
-        if [ -f "$WEIGHTS_DIR/ckpt_best.pt" ]; then
-            CKPT_PATH="$WEIGHTS_DIR/ckpt_best.pt"
-        else
-            FIRST_PT=$(find "$WEIGHTS_DIR" -maxdepth 1 -name "*.pt" | head -n 1)
-            if [ -n "$FIRST_PT" ]; then
-                CKPT_PATH="$FIRST_PT"
-            else
-                echo "[ERROR]: No checkpoint (.pt) found in weights directory $WEIGHTS_DIR"
-                exit 1
-            fi
-        fi
+WEIGHTS_DIR=$(readlink -f "$WEIGHTS_DIR")
+if [ -f "$WEIGHTS_DIR" ]; then
+    CKPT_PATH="$WEIGHTS_DIR"
+elif [ -d "$WEIGHTS_DIR" ]; then
+    if [ -f "$WEIGHTS_DIR/ckpt_best.pt" ]; then
+        CKPT_PATH="$WEIGHTS_DIR/ckpt_best.pt"
     else
-        echo "[ERROR]: WEIGHTS_DIR ($WEIGHTS_DIR) does not exist."
-        exit 1
+        FIRST_PT=$(find "$WEIGHTS_DIR" -maxdepth 1 -name "*.pt" | head -n 1)
+        if [ -n "$FIRST_PT" ]; then
+            CKPT_PATH="$FIRST_PT"
+        else
+            echo "[ERROR]: No checkpoint (.pt) found in weights directory $WEIGHTS_DIR"
+            exit 1
+        fi
     fi
 else
-    CKPT_PATH=$(readlink -f "$CKPT_PATH")
+    echo "[ERROR]: WEIGHTS_DIR ($WEIGHTS_DIR) does not exist."
+    exit 1
 fi
 
 DATA_DIR=$(readlink -f "$DATA_DIR")
 META_PATH=$(readlink -f "$META_PATH")
 
-OUTPUT_ARG=""
-if [ -n "$EMB_DIR" ]; then
-    EMB_DIR=$(readlink -f "$EMB_DIR")
-    # Resolve artifacts save directory
-    OUTPUT_ARG="--output_dir $EMB_DIR/anomalies"
+#--- EMBEDDING DETECTION LOGIC ---#
+EMB_DIR=$(readlink -f "$EMB_DIR")
+if [ -f "$EMB_DIR/EuclidImage.npy" ] || [ -f "$EMB_DIR/EuclidImage_phase1.npy" ] || [ -f "$EMB_DIR/ids.npy" ]; then
+    DETECTED_EMB="$EMB_DIR"
+else
+    SUBDIR=$(ls -td "${EMB_DIR}"/*/ 2>/dev/null | head -n 1)
+    if [ -n "$SUBDIR" ]; then
+        DETECTED_EMB="${SUBDIR%/}"
+    else
+        DETECTED_EMB=""
+    fi
 fi
 
-echo "Checkpoint Path:  $CKPT_PATH"
-echo "Dataset Dir:      $DATA_DIR"
-echo "Catalog Path:     $META_PATH"
-echo "Samples count:    $N_SAMPLES"
-echo "Split Selected:   $SPLIT"
-if [ -n "$OUTPUT_ARG" ]; then
-    echo "Output Dir:       $EMB_DIR/anomalies"
+if [ -n "$DETECTED_EMB" ]; then
+    DETECTED_EMB=$(readlink -f "$DETECTED_EMB")
+fi
+
+if [ -z "$DETECTED_EMB" ]; then
+    echo "[ERROR]: No valid embedding files (.npy) found in $EMB_DIR or its subdirectories."
+    exit 1
+fi
+
+OUTPUT_ARG=""
+if [ -n "$SAVE_DIR" ]; then
+    SAVE_DIR=$(readlink -f "$SAVE_DIR")
+    OUTPUT_ARG="--output_dir $SAVE_DIR"
+fi
+
+echo "Artifact Detection Configuration:"
+echo "    CHECKPOINT:     $CKPT_PATH"
+echo "    EMB DIR:        $DETECTED_EMB"
+echo "    DATASET DIR:    $DATA_DIR"
+echo "    CATALOG PATH:   $META_PATH"
+echo "    N CANDIDATES:   $N_CANDIDATES"
+echo "    N PLOT:         $N_PLOT"
+echo "    BASE MODALITY:  $BASE_MODALITY"
+if [ -n "$SAVE_DIR" ]; then
+    echo "    SAVE DIR:       $SAVE_DIR"
 fi
 echo "--------------------------------------------------------"
 
-# Run Python Auditor
+# Run Python Artifact Detector
 python3 "$REPO_ROOT/scripts/analysis/anomalies/artefacts_analysis.py" \
+    --embeddings_dir "$DETECTED_EMB" \
     --ckpt_path "$CKPT_PATH" \
     --data_dir "$DATA_DIR" \
     --metadata_path "$META_PATH" \
-    --n_samples "$N_SAMPLES" \
-    --split "$SPLIT" \
+    --n_candidates "$N_CANDIDATES" \
+    --n_plot "$N_PLOT" \
+    --base_modality "$BASE_MODALITY" \
     $OUTPUT_ARG
 
 echo "--------------------------------------------------------"
-echo "AstroPT Dataset Quality Audit Finished Successfully"
+echo "AstroPT Artifact Detection Finished Successfully"
 echo "--------------------------------------------------------"
