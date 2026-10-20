@@ -19,7 +19,7 @@ LAUNCH_SCRIPT="$REPO_ROOT/slurm/trainers/launch_pipeline.sh"
 
 # --- CONFIGURATION --- #
 TARGET_DATE="2026-06-23 9:15:00"
-CONFIG_FILE="$REPO_ROOT/config/20260621_Autoregresive_NoTokMix.yaml"
+CONFIG_FILE="$REPO_ROOT/config/astropt_mm_V1.yaml"
 
 # IMPORTANT: Point to the same directory and set init_from to resume
 TRAIN_DIR="/mnt/data_proj/iac18_mhuertas_shared/valonso/astroPT/logs/astropt_20260621_autoregresive_notokmix"

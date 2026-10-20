@@ -23,7 +23,7 @@ LAUNCH_SCRIPT="$REPO_ROOT/slurm/trainers/launch_pipeline.sh"
 TARGET_DATE="2026-06-12 00:30:00"
 
 # Training configuration
-CONFIG_FILE="$REPO_ROOT/config/20260612_Autoregresive_Optimized.yaml"
+CONFIG_FILE="$REPO_ROOT/config/astropt_mm_V1.yaml"
 TRAIN_NAME="scheduled_experiment"
 TRAIN_DESC="Add your detailed description here"
 EXTRA_ARGS=""
