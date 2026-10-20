@@ -32,21 +32,26 @@ fi
 
 # --- CONFIGURATION VARIABLES & ARGUMENT PARSING ---
 TARGET_IDS=""
-OUTPUT_DIR="/home/valonso/iac18_mhuertas_shared/valonso/astroPT/logs/dataset_individual_samples"
-METADATA_PATH="/home/valonso/iac18_aasensio_shared/euclid_dr1/catalog/catalog_MER_DR1_DESI_DR1_combined_wide_deep_v1.1.fits"
-DATA_DIR="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated"
-DARK_REGISTRY="/home/valonso/iac18_mhuertas_shared/valonso/astroPT/logs/dataset_images_flux_analysis/dark_galaxies_registry.csv"
+OUTPUT_DIR="/home/valonso/iac18_mhuertas_shared/valonso/astroPT/logs/dataset_logs/dataset_individual_samples"
+METADATA_PATH="/home/valonso/iac18_aasensio_shared/euclid_dr1/catalog/catalog_MER_DR1_DESI_DR1_combined_wide_deep_v1.1_FILTERED.fits"
+DATA_DIR="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow"
 
 # If arguments are passed to sbatch (e.g., sbatch script.sh -t "123 456"), we parse them:
-while getopts "t:o:m:d:h" opt; do
+while getopts "t:o:m:d:r:c:s:h" opt; do
   case $opt in
     t) TARGET_IDS="$OPTARG" ;;
     o) OUTPUT_DIR="$OPTARG" ;;
     m) METADATA_PATH="$OPTARG" ;;
     d) DATA_DIR="$OPTARG" ;;
+    r) RA="$OPTARG" ;;
+    c) DEC="$OPTARG" ;;
+    s) ID_STR="$OPTARG" ;;
     h)
-      echo "Usage: $0 -t \"TARGET_ID1 TARGET_ID2 ...\" [-o OUTPUT_DIR] [-m METADATA_PATH] [-d DATA_DIR]"
-      echo "  -t: Space-separated list of TargetIDs in quotes (e.g. -t \"39633411307996619 2305843017606509207\")"
+      echo "Usage: $0 [-t TARGET_IDS] [-r RA -c DEC] [-s ID_STR] [-o OUTPUT_DIR] [-m METADATA_PATH] [-d DATA_DIR]"
+      echo "  -t: Space-separated list of TargetIDs in quotes"
+      echo "  -r: Target Right Ascension in degrees"
+      echo "  -c: Target Declination in degrees"
+      echo "  -s: Lens ID string (id_str)"
       echo "  -o: Output directory to save diagnostic dashboard images"
       echo "  -m: Path to the FITS catalog containing survey metadata"
       echo "  -d: Path to Arrow dataset directory splits"
@@ -56,10 +61,11 @@ while getopts "t:o:m:d:h" opt; do
   esac
 done
 
-if [ -z "$TARGET_IDS" ]; then
-    echo "[CRITICAL ERROR] No TargetIDs provided! You must specify -t followed by a space-separated list of TargetIDs in quotes."
-    echo "Usage example:"
-    echo "  sbatch slurm/dataset/inspect_target.sh -t \"39633411307996619 2305843017606509207\""
+if [ -z "$TARGET_IDS" ] && { [ -z "$RA" ] || [ -z "$DEC" ]; } && [ -z "$ID_STR" ]; then
+    echo "[CRITICAL ERROR] No query parameter provided! You must specify either:"
+    echo "  -t TARGET_IDS (e.g. -t \"39633411307996619\")"
+    echo "  -r RA -c DEC  (e.g. -r 266.939 -c 64.047)"
+    echo "  -s ID_STR     (e.g. -s \"102157953_2669397021640472384\")"
     exit 1
 fi
 
@@ -67,11 +73,12 @@ echo "--------------------------------------------------------"
 echo "  AstroPT Target Audit & Inspector Slurm Job"
 echo "--------------------------------------------------------"
 echo "  Job ID:            ${SLURM_JOB_ID:-local}"
-echo "  Target IDs:        $TARGET_IDS"
+echo "  Target IDs:        ${TARGET_IDS:-N/A}"
+echo "  RA / DEC:          ${RA:-N/A} / ${DEC:-N/A}"
+echo "  Lens ID String:    ${ID_STR:-N/A}"
 echo "  Output Directory:  $OUTPUT_DIR"
 echo "  Metadata Path:     $METADATA_PATH"
 echo "  Arrow Data Dir:    $DATA_DIR"
-echo "  Dark Registry:     $DARK_REGISTRY"
 echo "--------------------------------------------------------"
 
 # Verify file existence before running
@@ -83,14 +90,21 @@ fi
 # Ensure output directory exists
 mkdir -p "$OUTPUT_DIR"
 
+# Build Python execution args
+EXEC_ARGS=""
+if [ -n "$TARGET_IDS" ]; then EXEC_ARGS="$EXEC_ARGS --target_ids $TARGET_IDS"; fi
+if [ -n "$RA" ]; then EXEC_ARGS="$EXEC_ARGS --ra $RA"; fi
+if [ -n "$DEC" ]; then EXEC_ARGS="$EXEC_ARGS --dec $DEC"; fi
+if [ -n "$ID_STR" ]; then EXEC_ARGS="$EXEC_ARGS --query_id_str $ID_STR"; fi
+
 # --- EXECUTION ---
 # Run the inspection python script
-python3 "$REPO_ROOT/scripts/dataset/dataset_individual_sample.py" \
-    --target_ids $TARGET_IDS \
+python3 "$REPO_ROOT/scripts/dataset/dataset_individual_sample_results.py" \
+    $EXEC_ARGS \
     --data_dir "$DATA_DIR" \
+    --data_dir_interpolated "${DATA_DIR}_interpolated" \
     --metadata_path "$METADATA_PATH" \
-    --output_dir "$OUTPUT_DIR" \
-    --dark_registry "$DARK_REGISTRY"
+    --output_dir "$OUTPUT_DIR"
 
 EXIT_STATUS=$?
 echo "--------------------------------------------------------"

@@ -5,39 +5,51 @@ echo "-------------------------------------------------"
 echo "Launching AstroCLIP Pipeline (Train + Post-Analysis)"
 echo "-------------------------------------------------"
 
-# PATH AND DIR CONFIGURATION
-REPO_ROOT="/home/valonso/iac18_mhuertas_shared/valonso/astroPT"
-SCRIPT_DIR=$(dirname "$0")
+# Robust repository root detection based on script location
+# (Script is in slurm/legacy/, so REPO_ROOT is two levels up)
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+
+# If SLURM has moved us to /var/spool, correct REPO_ROOT to the launch working directory
+if [[ "$REPO_ROOT" == "/var/spool"* ]]; then
+    REPO_ROOT="$PWD"
+fi
+
+# --- USER CONFIGURATION ---
+# Change these paths to match your cluster environment
 DATA_DIR="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated"
-META_PATH="/home/valonso/iac18_aasensio_shared/euclid_dr1/catalog/catalog_MER_DR1_DESI_DR1_combined_wide_deep_v1.1.fits"
+META_PATH="/home/valonso/iac18_aasensio_shared/euclid_dr1/catalog/catalog_MER_DR1_DESI_DR1_combined_wide_deep_v1.1_FILTERED.fits"
+# --------------------------
 
 # LAUNCHING SCRIPTS
 TRAIN_SCRIPT="$SCRIPT_DIR/train_astroclip_multiGPU.sh"
-PLOT_MET_SCRIPT="$SCRIPT_DIR/plot_training_metrics.sh"
-EXT_EMBD_SCRIPT="$SCRIPT_DIR/extract_embeddings_astroclip.sh"
-COS_SIM_SCRIPT="$SCRIPT_DIR/cosine_similarity.sh"
-UMAPS_SCRIPT="$SCRIPT_DIR/plot_umaps.sh"
-PROBING_SCRIPT="$SCRIPT_DIR/probing_downstream.sh"
-PROBING_DASH_SCRIPT="$SCRIPT_DIR/probing_downstream_dashboard.sh"
-LATENT_SCRIPT="$SCRIPT_DIR/probing_latent_mapper.sh"
-LATENT_DASH_SCRIPT="$SCRIPT_DIR/probing_latent_dashboard.sh"
-
+PLOT_MET_SCRIPT="$REPO_ROOT/slurm/analysis/dash_training_metrics.sh"
+EXT_EMBD_SCRIPT="$REPO_ROOT/slurm/legacy/extract_embeddings_astroclip.sh"
+COS_SIM_SCRIPT="$REPO_ROOT/slurm/analysis/dash_embeddings_alignment.sh"
+UMAPS_SCRIPT="$REPO_ROOT/slurm/analysis/dash_latent_projection.sh"
+PROBING_SCRIPT="$REPO_ROOT/slurm/probing/probing_downstream_benchmark.sh"
+PROBING_DASH_SCRIPT="$REPO_ROOT/slurm/analysis/dash_probing_downstream.sh"
+PREDICT_DASH_SCRIPT="$REPO_ROOT/slurm/analysis/dash_probing_predictions.sh"
+LATENT_SCRIPT="$REPO_ROOT/slurm/probing/probing_latent_retrieval.sh"
+LATENT_DASH_SCRIPT="$REPO_ROOT/slurm/analysis/dash_probing_latent.sh"
 # ARGUMENTS DEFAULT VALUES
 TRAIN_NAME="New Train"
 TRAIN_DESC="New AstroCLIP Training"
 TRAIN_EXTRA_ARGS=""
 J_PROB_DASH=""
 LAST_PROB_JOB_ID=""
+START_MODE="scratch"
 
-while getopts ":n:d:t:l:x:h" opt; do
+while getopts ":n:d:t:l:x:m:h" opt; do
   case $opt in
     n) TRAIN_NAME="$OPTARG" ;;
     d) TRAIN_DESC="$OPTARG" ;;
     t) TRAIN_DIR="$OPTARG" ;;
     l) LONG_TRAINING="$OPTARG" ;;
     x) TRAIN_EXTRA_ARGS="$OPTARG" ;;
+    m) START_MODE="$OPTARG" ;;
     h)
-       echo "Usage: $0 [-n 'Name'] [-d 'Description'] [-t 'output_path/'] [-l TRUE] [-x 'extra train flags']"
+       echo "Usage: $0 [-n 'Name'] [-d 'Description'] [-t 'output_path/'] [-l TRUE] [-x 'extra train flags'] [-m 'scratch|resume']"
        exit 0
        ;;
     \?)
@@ -46,7 +58,6 @@ while getopts ":n:d:t:l:x:h" opt; do
        ;;
   esac
 done
-
 # AUTOMATIC CONFIGURATION
 SUFIX_NAME=$(echo "$TRAIN_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/ /g' | xargs | tr ' ' '_')
 TRAIN_DATE="$(date +%Y%m%d)"
@@ -54,6 +65,7 @@ DEFAULT_PATH="$REPO_ROOT/logs/astroclip_${TRAIN_DATE}_${SUFIX_NAME}"
 
 if [ -z "${TRAIN_DIR:-}" ]; then
     TRAIN_DIR="$DEFAULT_PATH"
+fi
 
 # Absolute output paths
 TRAIN_DIR=$(readlink -f "$TRAIN_DIR")
@@ -77,11 +89,13 @@ if [[ ! -f "$ASTRODINO_CKPT" || ! -f "$SPECFORMER_CKPT" ]]; then
     echo "        https://huggingface.co/polymathic-ai/astrodino"
     echo "        https://huggingface.co/polymathic-ai/specformer"
     exit 1
+fi
 
 # Submit-time preflight so we do not enqueue long chains with broken imports.
 if [[ ! -f "$REPO_ROOT/.venv/bin/python" ]]; then
     echo "[ERROR] Missing virtualenv python at $REPO_ROOT/.venv/bin/python"
     exit 1
+fi
 
 echo "Running dependency preflight (dinov2 + astroclip imports)..."
 if ! REPO_ROOT="$REPO_ROOT" "$REPO_ROOT/.venv/bin/python" - <<'PY'
@@ -120,6 +134,10 @@ PY
 then
     echo "[ERROR] Aborting: missing dependencies in astroPT/.venv."
     exit 1
+fi
+
+# Change to REPO_ROOT so that any sbatch calls inherit the correct SLURM_SUBMIT_DIR
+cd "$REPO_ROOT" || { echo "[ERROR] Failed to cd to $REPO_ROOT"; exit 1; }
 
 # LAUNCH ANALYSIS FUNCTION
 launch_analysis() {
@@ -157,6 +175,7 @@ launch_analysis() {
     if [[ -z "$J_EMB" ]]; then
         echo "    [ERROR] Embedding extraction submission failed. Stopping analysis chain."
         return 1
+    fi
 
     # Cosine Similarity
     local J_COS=$(sbatch --parsable \
@@ -196,6 +215,7 @@ launch_analysis() {
     if [[ -z "$J_PROB" ]]; then
         echo "    [ERROR] Downstream probing submission failed. Stopping analysis chain."
         return 1
+    fi
     LAST_PROB_JOB_ID="$J_PROB"
 
     # Probing Dashboard
@@ -210,6 +230,21 @@ launch_analysis() {
     if [[ -z "$J_PROB_DASH" ]]; then
         echo "    [ERROR] Downstream dashboard submission failed. Stopping analysis chain."
         return 1
+    fi
+
+    # Probing Predictions Dashboard
+    local J_PRED_DASH=$(sbatch --parsable \
+                --dependency=afterok:$J_PROB \
+                --job-name="Predict_Dash$JOB_SUFFIX" \
+                "$PREDICT_DASH_SCRIPT" \
+                -r "$REPO_ROOT" \
+                -e "$EMB_DIR"
+            )
+    echo "    [PRED DASH]   Job sent. ID: $J_PRED_DASH (Depends on Probing: ok)"
+    if [[ -z "$J_PRED_DASH" ]]; then
+        echo "    [ERROR] Predictions dashboard submission failed. Stopping analysis chain."
+        return 1
+    fi
 
     # Latent Mapper
     local J_LATENT=$(sbatch --parsable \
@@ -225,6 +260,7 @@ launch_analysis() {
     if [[ -z "$J_LATENT" ]]; then
         echo "    [ERROR] Latent probing submission failed. Stopping analysis chain."
         return 1
+    fi
 
     # Latent Dashboard
     local J_LATENT_DASH=$(sbatch --parsable \
@@ -238,13 +274,14 @@ launch_analysis() {
     if [[ -z "$J_LATENT_DASH" ]]; then
         echo "    [ERROR] Latent dashboard submission failed. Stopping analysis chain."
         return 1
+    fi
 
     echo " --> Analysis Batch Sent."
 }
 
-# STEP 1 - TRAIN FROM SCRATCH
+# STEP 1 - TRAIN FROM SCRATCH OR RESUME
 echo "-------------------------------------------------"
-echo "STEP 1: TRAINING FROM SCRATCH"
+echo "STEP 1: TRAINING FROM $START_MODE"
 JOB_SUFFIX="_T1"
 JOB_TRAIN_1=$(sbatch --parsable \
     --job-name="Train_AstroCLIP_DDP$JOB_SUFFIX" \
@@ -254,15 +291,16 @@ JOB_TRAIN_1=$(sbatch --parsable \
     -a "$DATA_DIR" \
     -n "$TRAIN_NAME" \
     -d "$TRAIN_DESC" \
-    -m "scratch" \
+    -m "$START_MODE" \
     -k "all" \
     -x "$TRAIN_EXTRA_ARGS")
-echo "Training Job (Scratch) launched. ID: $JOB_TRAIN_1"
+echo "Training Job ($START_MODE) launched. ID: $JOB_TRAIN_1"
 if [[ -z "$JOB_TRAIN_1" ]]; then
     echo "[ERROR] Step 1 training submission failed. Aborting pipeline."
     exit 1
+fi
 
-launch_analysis "$JOB_TRAIN_1" "$JOB_SUFFIX" "Part 1 (SCRATCH)" || {
+launch_analysis "$JOB_TRAIN_1" "$JOB_SUFFIX" "Part 1 ($START_MODE)" || {
     echo "[ERROR] Analysis submission failed for STEP 1. Aborting pipeline."
     exit 1
 }
@@ -287,6 +325,7 @@ echo "Training Job (Resume) launched. ID: $JOB_TRAIN_2"
 if [[ -z "$JOB_TRAIN_2" ]]; then
     echo "[ERROR] Step 2 training submission failed. Aborting pipeline."
     exit 1
+fi
 
 launch_analysis "$JOB_TRAIN_2" "$JOB_SUFFIX" "Part 2 (Resume)" || {
     echo "[ERROR] Analysis submission failed for STEP 2. Aborting pipeline."
@@ -296,6 +335,7 @@ launch_analysis "$JOB_TRAIN_2" "$JOB_SUFFIX" "Part 2 (Resume)" || {
 # Optional step 3 for longer trainings
 if [ -z "${LONG_TRAINING:-}" ]; then
     LONG_TRAINING="FALSE"
+fi
 
 if [[ "$LONG_TRAINING" == "TRUE" ]]; then
     echo "-------------------------------------------------"
@@ -317,17 +357,15 @@ if [[ "$LONG_TRAINING" == "TRUE" ]]; then
     if [[ -z "$JOB_TRAIN_3" ]]; then
         echo "[ERROR] Step 3 training submission failed. Aborting pipeline."
         exit 1
+    fi
 
     launch_analysis "$JOB_TRAIN_3" "$JOB_SUFFIX" "Part 3 (Resume)" || {
         echo "[ERROR] Analysis submission failed for STEP 3. Aborting pipeline."
         exit 1
     }
+fi
 
 echo "-------------------------------------------------"
 echo "Pipeline Status Queue:"
 squeue -u "$USER" -S i -o "%.10i %.6P %.25j %.8T %.10M %.35E %R"
 echo "-------------------------------------------------"
-
-# Note:
-# Reconstruction/attention-specific AstroPT jobs are intentionally excluded.
-# This launcher copies the analysis chain from embedding extraction onward.

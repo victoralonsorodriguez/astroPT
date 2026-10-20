@@ -18,6 +18,7 @@ import argparse
 import json
 import logging
 import sys
+import os
 import gc
 import numpy as np
 from dataclasses import fields
@@ -235,7 +236,9 @@ def main():
     logger.info(f"Extracting to: {save_path}")
 
     mmaps = {
-        'ids': np.lib.format.open_memmap(save_path / 'ids.npy', mode='w+', dtype='int64', shape=(total_samples,))
+        'ids': np.lib.format.open_memmap(save_path / 'ids.npy', mode='w+', dtype='int64', shape=(total_samples,)),
+        'object_ids': np.lib.format.open_memmap(save_path / 'object_ids.npy', mode='w+', dtype='int64', shape=(total_samples,)),
+        'splits': np.lib.format.open_memmap(save_path / 'splits.npy', mode='w+', dtype='<U10', shape=(total_samples,))
     }
     
     canonical_mods = []
@@ -289,6 +292,11 @@ def main():
                 curr_bs = len(batch['targetid'])
                 end_idx = start_idx + curr_bs
                 mmaps['ids'][start_idx:end_idx] = batch['targetid'].cpu().numpy()
+                mmaps['splits'][start_idx:end_idx] = split_name
+                if 'object_id' in batch and batch['object_id'] is not None:
+                    mmaps['object_ids'][start_idx:end_idx] = batch['object_id'].cpu().numpy()
+                else:
+                    mmaps['object_ids'][start_idx:end_idx] = -1
 
                 embeddings = {}
                 if is_multimodal and args.order_mode == "isolated":
@@ -391,15 +399,55 @@ def main():
 
     # 5. Flush and PCA
     for m in mmaps.values(): m.flush()
+    
+    # Fallback: Populate missing object_ids (-1) from FITS catalog if needed
+    if (mmaps['object_ids'][:] == -1).any():
+        meta_path = getattr(training_config, 'metadata_path', None)
+        if meta_path and Path(meta_path).exists():
+            try:
+                from astropy.table import Table
+                logger.info(f"Populating missing object_ids from catalog: {meta_path}")
+                cat = Table.read(meta_path)
+                t_col = 'targetid' if 'targetid' in cat.colnames else 'TARGETID'
+                o_col = None
+                for cand in ['EUCLID_ID', 'euclid_id', 'object_id', 'OBJECT_ID', 'objectid', 'OBJID', 'id_euclid', 'ID_EUCLID']:
+                    if cand in cat.colnames:
+                        o_col = cand
+                        break
+                
+                if o_col is None:
+                    logger.warning(f"Could not find Euclid ID column in catalog. Available columns: {cat.colnames}")
+                else:
+                    logger.info(f"Using '{t_col}' for TargetID and '{o_col}' for Euclid ID")
+                    id_map = dict(zip(np.array(cat[t_col], dtype=np.int64), np.array(cat[o_col], dtype=np.int64)))
+                    t_ids = mmaps['ids'][:]
+                    o_ids = mmaps['object_ids'][:]
+                    matched = 0
+                    for idx_i, tid in enumerate(t_ids):
+                        if tid in id_map:
+                            o_ids[idx_i] = id_map[tid]
+                            matched += 1
+                    mmaps['object_ids'][:] = o_ids
+                    mmaps['object_ids'].flush()
+                    logger.info(f"Successfully mapped {matched} / {len(t_ids)} Euclid IDs!")
+            except Exception as e:
+                logger.warning(f"Could not populate object_ids from catalog: {e}")
+
     logger.info("Extraction complete. Starting PCA/NPZ packaging...")
 
     # PCA and NPZ
     final_data = {k: np.load(save_path / f"{k}.npy", mmap_mode='r') for k in mmaps.keys()}
     if args.pca_dim > 0:
         for k in final_data:
-            if k != 'ids':
+            if k not in ['ids', 'object_ids', 'splits']:
                 pca_path = apply_pca_to_memmap(save_path / f"{k}.npy", final_data[k].shape, args.pca_dim)
                 final_data[k] = np.load(pca_path, mmap_mode='r')
+
+    # Add standard alias keys for direct access
+    final_data['targetid'] = final_data['ids']
+    final_data['TARGETID'] = final_data['ids']
+    final_data['object_id'] = final_data['object_ids']
+    final_data['split'] = final_data['splits']
 
     np.savez_compressed(save_path / "embeddings_all.npz", **final_data)
     

@@ -31,7 +31,7 @@ from typing import Dict, List, Tuple, Optional, Any
 from contextlib import nullcontext
 
 from astropt.model import ModalityConfig, ModalityRegistry
-from astropt.euclid_desi_arrow_dataloader import EuclidDESIDatasetArrow
+from astropt.legacy.euclid_desi_arrow_dataloader import EuclidDESIDatasetArrow
 
 # Configure logging
 logging.basicConfig(

@@ -34,19 +34,20 @@ fi
 PYTHON_SCRIPT="$REPO_ROOT/scripts/experimental/diffusion_spectra_generation.py"
 
 # Default fallbacks
-CHECKPOINT_PATH="$REPO_ROOT/logs/astropt_20260601_hybrid_optimized/diffusion/weights/ckpt_best.pt"
-EMBEDDINGS_PATH="$REPO_ROOT/logs/astropt_20260601_hybrid_optimized/embeddings/best_img-mean_spec-rank_final_iso_j-mean/embeddings_all.npz"
+CHECKPOINT_PATH="$REPO_ROOT/logs/astropt_20260612_autoregresive_optimized/diffusion/weights/ckpt_best.pt"
+EMBEDDINGS_PATH="$REPO_ROOT/logs/astropt_20260612_autoregresive_optimized/embeddings_full/best_img-mean_spec-rank_final_iso_j-mean/embeddings_all.npz"
 EMBEDDINGS_KEY="EuclidImage_phase2"
 GALAXY_ID=""
 INDEX=""
 REDSHIFT=""
-REDSHIFT_PROBE_PATH="$REPO_ROOT/logs/astropt_20260601_hybrid_optimized/embeddings/best_img-mean_spec-rank_final_iso_j-mean/downstream_tasks/probing_MLP.pt"
-OUTPUT_PATH="$REPO_ROOT/logs/astropt_20260601_hybrid_optimized/diffusion/samples/"
+REDSHIFT_PROBE_PATH="$REPO_ROOT/logs/astropt_20260612_autoregresive_optimized/embeddings/best_img-mean_spec-rank_final_iso_j-mean/downstream_tasks/probing_MLP.pt"
+OUTPUT_PATH="$REPO_ROOT/logs/astropt_20260612_autoregresive_optimized/diffusion/samples/"
 DATA_DIR="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated"
 METADATA_PATH="/home/valonso/iac18_aasensio_shared/euclid_dr1/catalog/catalog_MER_DR1_DESI_DR1_combined_wide_deep_v1.1_FILTERED.fits"
 PLOT_ORIGINAL=0
 LAYOUT="dashboard"
 ENSEMBLE=1
+USE_KNN_SPEC=1
 
 # If invoked as: sbatch script.sh -- -c <checkpoint> ...
 if [[ "${1:-}" == "--" ]]; then
@@ -54,7 +55,7 @@ if [[ "${1:-}" == "--" ]]; then
 fi
 
 #--- ARGUMENT PARSING (FLAGS) ---#
-while getopts ":r:c:e:k:g:i:z:p:o:d:xl:sm:" opt; do
+while getopts ":r:c:e:k:g:i:z:p:o:d:xl:sm:n" opt; do
   case $opt in
     r) REPO_ROOT="$OPTARG" ;;
     c) CHECKPOINT_PATH="$OPTARG" ;;
@@ -70,6 +71,7 @@ while getopts ":r:c:e:k:g:i:z:p:o:d:xl:sm:" opt; do
     x) PLOT_ORIGINAL=1 ;;
     l) LAYOUT="$OPTARG" ;;
     s) ENSEMBLE=1 ;;
+    n) USE_KNN_SPEC=1 ;;
     \?) echo "[ERROR] Invalid option -$OPTARG" >&2; exit 1 ;;
   esac
 done
@@ -187,6 +189,9 @@ if [[ -n "${LAYOUT:-}" ]]; then
 fi
 if [[ "$ENSEMBLE" -eq 1 ]]; then
   OPTIONAL_FLAGS="$OPTIONAL_FLAGS --ensemble"
+fi
+if [[ "$USE_KNN_SPEC" -eq 1 ]]; then
+  OPTIONAL_FLAGS="$OPTIONAL_FLAGS --use_knn_spec"
 fi
 
 python3 "$PYTHON_SCRIPT" \

@@ -157,26 +157,35 @@ def load_data(selected_csvs: list, runs_dict: dict):
                     row['Modality'] = 'Joint'
                     if 'phase1' in mod_lower:
                         row['Test_Name'] = f"{name} (Joint Phase 1)"
+                        row['Format'] = "Joint Phase 1"
                     elif 'phase2' in mod_lower:
                         row['Test_Name'] = f"{name} (Joint Phase 2)"
+                        row['Format'] = "Joint Phase 2"
                     elif 'concat' in mod_lower:
                         row['Test_Name'] = f"{name} (Joint Concat)"
+                        row['Format'] = "Joint Concat"
                     else:
                         row['Test_Name'] = f"{name} (Joint Mean)"
+                        row['Format'] = "Joint Mean"
                 else:
                     if '_phase1' in mod:
                         row['Modality'] = mod.replace('_phase1', '')
                         row['Test_Name'] = f"{name} (Phase 1)"
+                        row['Format'] = "Phase 1"
                     elif '_phase2' in mod:
                         row['Modality'] = mod.replace('_phase2', '')
                         row['Test_Name'] = f"{name} (Phase 2)"
+                        row['Format'] = "Phase 2"
                     elif '_pooled' in mod:
                         row['Modality'] = mod.replace('_pooled', '')
                         row['Test_Name'] = f"{name} (Pooled)"
+                        row['Format'] = "Pooled"
                     elif has_phases and mod in ['EuclidImage', 'DESISpectrum', 'images', 'spectra', 'cls', 'CLS']:
                         row['Test_Name'] = f"{name} (Pooled)"
+                        row['Format'] = "Pooled"
                     else:
                         row['Test_Name'] = name
+                        row['Format'] = "Base"
                 return row
 
             df = df.apply(process_row, axis=1)
@@ -364,9 +373,35 @@ def main():
         st.error("No valid data could be loaded.")
         return
 
+    # Filter Modalities / Formats in sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Filter Modalities / Formats")
+    
+    available_formats = sorted(df['Format'].dropna().unique().tolist())
+    selected_formats = st.sidebar.multiselect(
+        "Select Formats / Sub-modalities",
+        options=available_formats,
+        default=available_formats
+    )
+    
+    df_filtered_formats = df[df['Format'].isin(selected_formats)]
+    
+    available_tests = sorted(df_filtered_formats['Test_Name'].dropna().unique().tolist())
+    selected_tests = st.sidebar.multiselect(
+        "Select Specific Run Components",
+        options=available_tests,
+        default=available_tests
+    )
+    
+    df_plot = df_filtered_formats[df_filtered_formats['Test_Name'].isin(selected_tests)]
+    
+    if df_plot.empty:
+        st.warning("No data matches the selected formats or run components.")
+        return
+
     # Extract available targets and metrics
     all_targets = sorted(df['Target'].dropna().unique().tolist())
-    metadata_cols = ['Target', 'Task', 'Modality', 'Probe', 'Test_Name', 'Config']
+    metadata_cols = ['Target', 'Task', 'Modality', 'Probe', 'Test_Name', 'Config', 'Format']
     all_metrics = [col for col in df.columns if col not in metadata_cols and pd.api.types.is_numeric_dtype(df[col])]
     
     # Multi-select for targets
@@ -404,7 +439,7 @@ def main():
         selected_targets = edited_df.sort_values("Order")["Target"].tolist()
     
     # Pre-calculate active tests to avoid redundancy
-    active_tests = df[df['Target'].isin(selected_targets)]['Test_Name'].unique()
+    active_tests = df_plot[df_plot['Target'].isin(selected_targets)]['Test_Name'].unique()
     active_tests = sorted(active_tests)
     
     # Multi-select for metrics
@@ -491,7 +526,7 @@ def main():
     plotly_symbols = ['circle', 'diamond', 'square', 'cross', 'star', 'triangle-up', 'x', 'pentagon']
     
     # Filter only the test names that will actually be plotted
-    active_tests = df[df['Target'].isin(selected_targets)]['Test_Name'].unique()
+    active_tests = df_plot[df_plot['Target'].isin(selected_targets)]['Test_Name'].unique()
     active_tests = sorted(active_tests)
     
     # Create a mapping for consistent styles across all subplots
@@ -580,7 +615,7 @@ def main():
         for col, target in zip(cols, selected_targets):
             with col:
                 # Filter strictly by selected configs
-                target_df = df[(df['Target'] == target) & (df[metric].notna()) & (df['Config'].isin(selected_configs))].copy()
+                target_df = df_plot[(df_plot['Target'] == target) & (df_plot[metric].notna()) & (df_plot['Config'].isin(selected_configs))].copy()
                 
                 if target_df.empty:
                     st.write(f"No data for {target}")

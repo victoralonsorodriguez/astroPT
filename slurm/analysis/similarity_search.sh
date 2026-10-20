@@ -37,7 +37,7 @@ K=5
 QUERY_ID=""
 
 #--- ARGUMENT PARSING (FLAGS) ---#
-while getopts ":r:w:s:e:f:a:q:k:" opt; do
+while getopts ":r:w:s:e:f:a:q:p:k:" opt; do
   case $opt in
     r) REPO_ROOT="$OPTARG" ;;
     w) WEIGHTS_DIR="$OPTARG" ;;
@@ -46,14 +46,20 @@ while getopts ":r:w:s:e:f:a:q:k:" opt; do
     f) META_PATH="$OPTARG" ;;
     a) DATA_DIR="$OPTARG" ;;
     q) QUERY_ID="$OPTARG" ;;
+    p) QUERY_FITS="$OPTARG" ;;
     k) K="$OPTARG" ;;
     \?) echo "[ERROR] Invalid option -$OPTARG" >&2; exit 1 ;;
   esac
 done
 
-if [ -z "$WEIGHTS_DIR" ] || [ -z "$EMB_DIR" ] || [ -z "$QUERY_ID" ]; then
-  echo "[ERROR]: WEIGHTS_DIR, EMB_DIR and QUERY_ID are required"
-  echo "Usage: $0 -w <weights_dir> -e <embeddings_dir_or_root> -q <query_targetid> [-k num_neighbors] [-s save_dir] [-a data_dir] [-f metadata_path]"
+if [ -z "$WEIGHTS_DIR" ] || [ -z "$EMB_DIR" ]; then
+  echo "[ERROR]: WEIGHTS_DIR and EMB_DIR are required"
+  echo "Usage: $0 -w <weights_dir> -e <embeddings_dir_or_root> [-q <query_targetid> | -p <query_fits>] [-k num_neighbors] [-s save_dir] [-a data_dir] [-f metadata_path]"
+  exit 1
+fi
+
+if [ -z "$QUERY_ID" ] && [ -z "$QUERY_FITS" ]; then
+  echo "[ERROR]: You must provide either QUERY_ID (-q) or QUERY_FITS (-p)."
   exit 1
 fi
 
@@ -63,7 +69,6 @@ DATA_DIR=$(readlink -f "$DATA_DIR")
 META_PATH=$(readlink -f "$META_PATH")
 EMB_DIR=$(readlink -f "$EMB_DIR")
 
-# Checkpoint Resolution
 if [ -f "$WEIGHTS_DIR" ]; then
     CKPT_PATH="$WEIGHTS_DIR"
 elif [ -d "$WEIGHTS_DIR" ]; then
@@ -131,6 +136,15 @@ if [ -n "$SAVE_DIR" ]; then
     OUTPUT_ARG="--output_dir $SAVE_DIR"
 fi
 
+# Build Query Argument
+if [ -n "$QUERY_ID" ]; then
+    QUERY_ARG="--query_id $QUERY_ID"
+    QUERY_LOG="QUERY TARGETID: $QUERY_ID"
+else
+    QUERY_ARG="--query_fits $QUERY_FITS"
+    QUERY_LOG="QUERY FITS PATH: $QUERY_FITS"
+fi
+
 #--- EXECUTION ---#
 echo "Multimodal Similarity Search Configuration:"
 echo "    PYTHON SCRIPT:  $PYTHON_SCRIPT"
@@ -138,7 +152,7 @@ echo "    CHECKPOINT:     $CKPT_PATH"
 echo "    EMB DIR:        $DETECTED_EMB"
 echo "    METADATA:       $META_PATH"
 echo "    DATA DIR:       $DATA_DIR"
-echo "    QUERY TARGETID: $QUERY_ID"
+echo "    $QUERY_LOG"
 echo "    NEIGHBORS (K):  $K"
 if [ -n "$SAVE_DIR" ]; then
     echo "    SAVE DIR:       $SAVE_DIR (User-Specified)"
@@ -150,7 +164,7 @@ python3 "$PYTHON_SCRIPT" \
     --ckpt_path "$CKPT_PATH" \
     --data_dir "$DATA_DIR" \
     --metadata_path "$META_PATH" \
-    --query_id "$QUERY_ID" \
+    $QUERY_ARG \
     --k "$K" \
     $OUTPUT_ARG
 

@@ -302,10 +302,10 @@ class PairedEmbeddingSpectraDataset(Dataset):
         
         # Auto-detect embeddings key if not present in the NPZ archive
         if embeddings_key not in npz:
-            if "EuclidImage" in npz:
-                embeddings_key = "EuclidImage"
-            elif "images" in npz:
-                embeddings_key = "images"
+            for k in ["EuclidImage_phase2", "EuclidImage_pooled", "EuclidImage", "images", "best_img-mean"]:
+                if k in npz:
+                    embeddings_key = k
+                    break
                 
         # Auto-detect target ID key
         id_key = "ids" if "ids" in npz else "targetid"
@@ -496,7 +496,7 @@ def main() -> None:
             npz_check = np.load(config.embeddings_path)
             detected_key = config.embeddings_key
             if detected_key not in npz_check:
-                for k in ["EuclidImage_phase2", "EuclidImage", "images"]:
+                for k in ["EuclidImage_phase2", "EuclidImage_pooled", "EuclidImage", "images", "best_img-mean"]:
                     if k in npz_check:
                         detected_key = k
                         break

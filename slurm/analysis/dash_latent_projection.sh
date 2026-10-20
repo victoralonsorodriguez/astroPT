@@ -30,13 +30,16 @@ if [[ "$REPO_ROOT" == "/var/spool"* ]]; then
 fi
 
 PYTHON_SCRIPT="$REPO_ROOT/scripts/analysis/dashboards/dash_latent_projection.py"
+INTERACTIVE_SCRIPT="$REPO_ROOT/scripts/analysis/dashboards/dash_latent_projection_interactive.py"
+INTERACTIVE_MODE=0
+STREAMLIT_PORT=8501
 
 # Default metadata and data paths (can be overridden with flags)
 DATA_DIR="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow"
 META_PATH="/home/valonso/iac18_aasensio_shared/euclid_dr1/catalog/catalog_MER_DR1_DESI_DR1_combined_wide_deep_v1.1.fits"
 
 #--- ARGUMENT PARSING (FLAGS) ---#
-while getopts ":r:w:s:e:a:f:" opt; do
+while getopts ":r:w:s:e:a:f:ip:" opt; do
   case $opt in
     r) REPO_ROOT="$OPTARG" ;;
     w) WEIGHTS_DIR="$OPTARG" ;;
@@ -44,13 +47,15 @@ while getopts ":r:w:s:e:a:f:" opt; do
     e) EMB_DIR="$OPTARG" ;;
     a) DATA_DIR="$OPTARG" ;;
     f) META_PATH="$OPTARG" ;;
+    i) INTERACTIVE_MODE=1 ;;
+    p) STREAMLIT_PORT="$OPTARG" ;;
     \?) echo "[ERROR] Invalid option -$OPTARG" >&2; exit 1 ;;
   esac
 done
 
 if [ -z "$WEIGHTS_DIR" ] || [ -z "$EMB_DIR" ]; then
   echo "[ERROR]: WEIGHTS_DIR and EMB_DIR are required"
-  echo "Usage: $0 -w <weights_dir> -e <embedding_dir_or_root> [-s save_dir] [-a data_dir] [-f metadata_path]"
+  echo "Usage: $0 -w <weights_dir> -e <embedding_dir_or_root> [-s save_dir] [-a data_dir] [-f metadata_path] [-i] [-p port]"
   exit 1
 fi
 
@@ -114,20 +119,56 @@ echo "    METADATA:       $META_PATH"
 echo "    DATA DIR:       $DATA_DIR" 
 echo "    WEIGHTS DIR:    $WEIGHTS_DIR"
 echo "    EMB DIR:        $DETECTED_EMB"
+echo "    INTERACTIVE:    $INTERACTIVE_MODE"
 if [ -n "$SAVE_DIR" ]; then
     echo "    SAVE DIR:       $SAVE_DIR (User-Specified)"
 fi
 
-# Run Python Script
-python "$PYTHON_SCRIPT" \
-    --metadata_path "$META_PATH" \
-    --weights_dir "$WEIGHTS_DIR" \
-    --emb_dir "$DETECTED_EMB" \
-    $SAVE_ARG \
-    --data_dir "$DATA_DIR" \
-    --plot_spectral \
-    --plot_visual \
-    --plot_standard
+if [ "$INTERACTIVE_MODE" -eq 1 ]; then
+    # Check if 3D UMAP caches exist for active modalities
+    CACHE_3D_EXISTS=1
+    
+    # Check if the folder contains any modality files to check against
+    for f in "$DETECTED_EMB"/*.npy; do
+        filename=$(basename "$f")
+        if [[ "$filename" != "ids.npy" && "$filename" != "targetid.npy" && "$filename" != "metadata.npy" && "$filename" != "indices.npy" && "$filename" != cache_umap* ]]; then
+            mod_name="${filename%.npy}"
+            cache_file="$DETECTED_EMB/cache_umap_3d_${mod_name}.npy"
+            if [ ! -f "$cache_file" ]; then
+                CACHE_3D_EXISTS=0
+                break
+            fi
+        fi
+    done
+    
+    if [ "$CACHE_3D_EXISTS" -eq 0 ]; then
+        echo "    [INFO]: 3D UMAP cache files not found. Precomputing UMAP-3D coordinates using full resources..."
+        python "$PYTHON_SCRIPT" \
+            --metadata_path "$META_PATH" \
+            --weights_dir "$WEIGHTS_DIR" \
+            --emb_dir "$DETECTED_EMB" \
+            --dim 3
+    else
+        echo "    [INFO]: Found precomputed UMAP-3D cache files. Skipping calculation."
+    fi
+
+    echo "    Launching Interactive 3D Latent Projections on port $STREAMLIT_PORT..."
+    streamlit run "$INTERACTIVE_SCRIPT" --server.port "$STREAMLIT_PORT" --server.address 0.0.0.0 -- \
+        --metadata_path "$META_PATH" \
+        --weights_dir "$WEIGHTS_DIR" \
+        --emb_dir "$DETECTED_EMB"
+else
+    # Run Python Script
+    python "$PYTHON_SCRIPT" \
+        --metadata_path "$META_PATH" \
+        --weights_dir "$WEIGHTS_DIR" \
+        --emb_dir "$DETECTED_EMB" \
+        $SAVE_ARG \
+        --data_dir "$DATA_DIR" \
+        --plot_spectral \
+        --plot_visual \
+        --plot_standard
+fi
 
 echo "-----------------------------------------------"
 echo "Latent Projections Finished"

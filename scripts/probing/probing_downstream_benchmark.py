@@ -64,7 +64,8 @@ DEFAULT_TARGETS = ['Z', 'LOGMSTAR', 'LOGSFR', 'GR',
                     'flux_detection_total', 'HALPHA_EW', 'HALPHA_FLUX', 'NII_6584_FLUX', 'OIII_5007_FLUX', 'OIII_5007_SIGMA', 'HBETA_FLUX',
                     'smooth_or_featured_smooth',
                     'sersic_sersic_vis_radius', 'sersic_sersic_vis_index', 'sersic_sersic_vis_axis_ratio',
-                    'has_spiral_arms_yes', 'smoothness', 'gini', 'SPECTYPE', 'data_set_release']
+                    'has_spiral_arms_yes', 'smoothness', 'gini', 'SPECTYPE', 'data_set_release',
+                    'phz_pp_median_redshift', 'phz_pp_median_stellarmass']
 
 CLASSIFICATION_TARGETS = ['SPECTYPE', 'data_set_release'] 
 
@@ -358,6 +359,12 @@ def get_task_data(
             err_vals = np.where(ivar_vals > 0, 1.0 / np.sqrt(ivar_vals.clip(lower=1e-10)), np.inf)
             mask &= (vals > 3.0 * err_vals)
             logger.info(f"    [Dynamic Filter] Applied SNR > 3 quality filter for regression target '{target_col}' using '{ivar_col}'.")
+            
+        # Specific quality mask for photometrically derived physical parameters
+        if target_col in ['phz_pp_median_redshift', 'phz_pp_median_stellarmass']:
+            if 'phys_param_flags' in df.columns and 'phz_flags' in df.columns:
+                mask &= (df['phys_param_flags'] == 0) & (df['phz_flags'] == 0)
+                logger.info(f"    [Euclid Photometry Filter] Applied phys_param_flags == 0 and phz_flags == 0 for '{target_col}'.")
     else:
         task_type = 'classification'
         mask = vals.notna() & (vals != "") & (vals != "N/A")
@@ -404,16 +411,16 @@ def compute_metrics(
         r2 = r2_score(y_true, y_pred)
         rmse = np.sqrt(mean_squared_error(y_true, y_pred))
         
-        if target_name == 'Z':
-            # REDSHIFT (Z)
+        if target_name in ['Z', 'phz_pp_median_redshift']:
+            # REDSHIFT (Z / Photometric)
             # Reference: Gosia's Paper: Normalized error > 0.15
             norm_diff = diff / (1 + y_true)
             bias = np.median(norm_diff) 
             nmad = 1.4826 * np.median(np.abs(norm_diff - np.median(norm_diff)))
             outliers = np.mean(np.abs(norm_diff) > 0.15) * 100
             
-        elif target_name == 'LOGMSTAR':
-            # STELLAR MASS
+        elif target_name in ['LOGMSTAR', 'phz_pp_median_stellarmass']:
+            # STELLAR MASS (LOGMSTAR / Photometric)
             # Reference: Gosia's Paper: Error > 0.25
             bias = np.median(diff)      
             nmad = 1.4826 * np.median(np.abs(diff - np.median(diff)))
@@ -951,6 +958,7 @@ def main():
 
                     metrics_per_seed = []
                     best_epochs = []
+                    preds_list = []
                     
                     best_seed_score = -float('inf')
                     best_model_data = None
@@ -974,6 +982,7 @@ def main():
                             ids=ids_filtered,
                             knn_neighbors=args.knn_neighbors,
                         )
+                        preds_list.append(preds)
                         seed_metrics = compute_metrics(true_vals, preds, task_type, target_col)
                         metrics_per_seed.append(seed_metrics)
                         best_epochs.append(best_epoch)
@@ -1035,12 +1044,17 @@ def main():
                     # SAVE TO CSV IMMEDIATELY
                     save_row_to_csv(row, csv_path)
                     
-                    # Guardar predicciones (usando el último seed)
+                    # Guardar predicciones (promediadas entre semillas para regresión)
+                    if task_type == 'regression' and preds_list:
+                        preds_to_save = np.mean(preds_list, axis=0)
+                    else:
+                        preds_to_save = preds
+                        
                     pred_dir = save_dir / "predictions"
                     pred_dir.mkdir(parents=True, exist_ok=True)
                     safe_target = str(target_col).replace('/', '_').replace(' ', '_')
                     pred_filename = pred_dir / f"preds_{safe_target}_{mode}_{probe}.npz"
-                    np.savez(pred_filename, preds=preds, true_vals=true_vals, targetid=test_ids)
+                    np.savez(pred_filename, preds=preds_to_save, true_vals=true_vals, targetid=test_ids)
 
 
                     seed_stats_row = {

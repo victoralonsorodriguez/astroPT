@@ -364,45 +364,57 @@ def main():
     
     # Plot MFU (Left Axis)
     if 'mfu' in df.columns:
-        
-        mfu_data = train_df[train_df['mfu'] > 0]
-        
-        max_mfu = mfu_data['mfu'].max()
-        min_mfu = mfu_data['mfu'].min()
-        range_mfu = max_mfu - min_mfu
-        
-        if range_mfu == 0: range_mfu = max_mfu * 0.1
-        
-        ax4.plot(mfu_data['iter'], mfu_data['mfu'], color=color_mfu, lw=1.5, label='MFU (\\%)')
-        ax4.set_ylabel(r'\textbf{MFU (\%)}', color=color_mfu)
-        ax4.tick_params(axis='y', labelcolor=color_mfu)
-        
-        yticks_mfu = np.linspace(min_mfu, max_mfu, target_ticks)
-        ax4.set_yticks(yticks_mfu)
-        
-        pad = range_mfu * margin_fraction
-        ax4.set_ylim(min_mfu - pad, max_mfu + pad)
+        mfu_data = train_df[train_df['mfu'] > 0].dropna(subset=['mfu'])
+        if not mfu_data.empty:
+            max_mfu = mfu_data['mfu'].max()
+            min_mfu = mfu_data['mfu'].min()
+            range_mfu = max_mfu - min_mfu
+            
+            if pd.isna(range_mfu) or np.isinf(range_mfu):
+                range_mfu = 0.1
+            if range_mfu == 0:
+                range_mfu = max_mfu * 0.1 if max_mfu != 0 else 0.1
+            
+            if not pd.isna(min_mfu) and not pd.isna(max_mfu) and not np.isinf(min_mfu) and not np.isinf(max_mfu):
+                ax4.plot(mfu_data['iter'], mfu_data['mfu'], color=color_mfu, lw=1.5, label='MFU (\\%)')
+                ax4.set_ylabel(r'\textbf{MFU (\%)}', color=color_mfu)
+                ax4.tick_params(axis='y', labelcolor=color_mfu)
+                
+                yticks_mfu = np.linspace(min_mfu, max_mfu, target_ticks)
+                ax4.set_yticks(yticks_mfu)
+                
+                pad = range_mfu * margin_fraction
+                ax4.set_ylim(min_mfu - pad, max_mfu + pad)
+            else:
+                ax4.text(0.5, 0.5, "No MFU Data Available", transform=ax4.transAxes, ha='center')
+        else:
+            ax4.text(0.5, 0.5, "No MFU Data Available", transform=ax4.transAxes, ha='center')
     
     # Plot VRAM (Right Axis)
     if 'mem_gb' in df.columns:
-        ax4r = ax4.twinx()
-        max_mem = train_df['mem_gb'].max()
-        min_mem = train_df['mem_gb'].min()
-        range_mem = max_mem - min_mem
-        
-        if range_mem == 0: range_mem = max_mem * 0.1
-        
-        ax4r.plot(train_df['iter'], train_df['mem_gb'], color=color_mem, linestyle='--', lw=1.5, label='VRAM (GB)')
-        ax4r.set_ylabel(r'\textbf{VRAM (GB)}', color=color_mem)
-        ax4r.tick_params(axis='y', labelcolor=color_mem)
-        
-        yticks_mem = np.linspace(min_mem, max_mem, target_ticks)
-        ax4r.set_yticks(yticks_mem)
-        
-        pad_mem = range_mem * margin_fraction
-        ax4r.set_ylim(min_mem - pad_mem, max_mem + pad_mem)
-        
-        ax4r.grid(False) 
+        mem_data = train_df.dropna(subset=['mem_gb'])
+        if not mem_data.empty:
+            max_mem = mem_data['mem_gb'].max()
+            min_mem = mem_data['mem_gb'].min()
+            range_mem = max_mem - min_mem
+            
+            if pd.isna(range_mem) or np.isinf(range_mem):
+                range_mem = 0.1
+            if range_mem == 0:
+                range_mem = max_mem * 0.1 if max_mem != 0 else 0.1
+            
+            if not pd.isna(min_mem) and not pd.isna(max_mem) and not np.isinf(min_mem) and not np.isinf(max_mem):
+                ax4r = ax4.twinx()
+                ax4r.plot(mem_data['iter'], mem_data['mem_gb'], color=color_mem, linestyle='--', lw=1.5, label='VRAM (GB)')
+                ax4r.set_ylabel(r'\textbf{VRAM (GB)}', color=color_mem)
+                ax4r.tick_params(axis='y', labelcolor=color_mem)
+                
+                yticks_mem = np.linspace(min_mem, max_mem, target_ticks)
+                ax4r.set_yticks(yticks_mem)
+                
+                pad_mem = range_mem * margin_fraction
+                ax4r.set_ylim(min_mem - pad_mem, max_mem + pad_mem)
+                ax4r.grid(False) 
     
     ax4.set_title(r'\textbf{Efficiency \& Resources}', pad=15)
     ax4.set_xlabel(r'\textbf{Iterations}')

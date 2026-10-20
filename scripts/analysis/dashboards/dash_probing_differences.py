@@ -43,6 +43,11 @@ def get_best_r2_info(df: pd.DataFrame, target: str, modality_type: str):
     if subset.empty:
         return None, None
     
+    # Filter to only consider MLP probers for representation models, and keep supervised baselines
+    subset = subset[subset['Probe'].str.upper().isin(['MLP', 'RESNET18', 'TRANSFORMER_BASELINE'])]
+    if subset.empty:
+        return None, None
+    
     if modality_type == 'spectra':
         mask = subset['Modality'].apply(is_spectra)
     elif modality_type == 'images':
@@ -513,6 +518,15 @@ def main() -> None:
         
         run_a_name = get_run_name(args.hybrid_csv, "Run A")
         run_b_name = get_run_name(args.compare_csv, "Run B")
+        
+        import re
+        def sanitize_filename(name: str) -> str:
+            cleaned = re.sub(r'[\s/\\?%*:|"<>\[\]\(\)+]+', '_', name)
+            return re.sub(r'_+', '_', cleaned).strip('_')
+            
+        run_a_clean = sanitize_filename(run_a_name)
+        run_b_clean = sanitize_filename(run_b_name)
+        filename = f"r2_diff_{run_a_clean}_vs_{run_b_clean}.png"
             
         title = f"AstroPT Comparison: ({run_a_name}) vs ({run_b_name})"
         ylabel = f"R2 Difference: ({run_a_name}) vs ({run_b_name})"
@@ -520,7 +534,7 @@ def main() -> None:
         generate_comparison_plot(
             run_a_df=run_a_df,
             run_b_df=run_b_df,
-            output_path=save_dir / "r2_diff_compare_runs.png",
+            output_path=save_dir / filename,
             title=title,
             ylabel=ylabel
         )

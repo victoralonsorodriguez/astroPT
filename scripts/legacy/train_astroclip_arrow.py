@@ -33,8 +33,8 @@ from torch.utils.data import DataLoader
 from torchvision.transforms import CenterCrop
 from transformers import HfArgumentParser
 
-# Assuming this script is executed from astroPT/scripts
-ASTROPT_DIR = Path(__file__).resolve().parent.parent
+# Assuming this script is executed from astroPT/scripts/legacy
+ASTROPT_DIR = Path(__file__).resolve().parent.parent.parent
 ASTROCLIP_DIR = ASTROPT_DIR.parent / "AstroCLIP"
 
 if str(ASTROPT_DIR / "src") not in sys.path:
@@ -42,7 +42,8 @@ if str(ASTROPT_DIR / "src") not in sys.path:
 if str(ASTROCLIP_DIR) not in sys.path:
     sys.path.append(str(ASTROCLIP_DIR))
 
-from astropt.euclid_desi_arrow_dataloader import EuclidDESIDatasetArrow
+from astropt.dataloader_multimodal import MultimodalDatasetArrow
+from astropt.processors import EuclidImageProcessor, DESISpectrumProcessor
 from astropt.model import ModalityConfig, ModalityRegistry
 
 from astroclip.models.astroclip import AstroClipModel, ImageHead, SpectrumHead
@@ -93,24 +94,25 @@ class AstroCLIPArrowConfig:
     max_epochs: int = 100
     weight_decay: float = 1e-1
     beta1: float = 0.9
-    beta2: float = 0.95
-    grad_clip: float = 1.0
+    beta2: float = 0.98
+    grad_clip: float = 2.0
     gradient_accumulation_steps: int = 40
 
     #--- Learning Rate Scheduler ---#
     learning_rate: float = 3e-4
     lr_min: float = 3e-5
-    lr_warmup_steps: int = 4_000
-    lr_decay_steps: int = 65_000
+    lr_warmup_steps: int = 5_000
+    lr_decay_steps: int = 70_000
     max_steps: int = -1
 
     #--- Logging & Checkpointing ---#
     val_check_interval: int = 1000
-    limit_val_batches: int = 100
+    limit_val_batches: int = 200
     log_interval: int = 200
     checkpoint_interval: int = 1_000
     checkpoint_save_type: str = "both"      # best, last, both or all
-    early_stopping_patience: int = 10
+    early_stopping_patience: int = 15
+    early_stopping_min_iters: int = 50_000
 
     #--- System & Backend ---#
     precision: str = "bf16-mixed"
@@ -245,6 +247,8 @@ def validate_runtime_flags(config: AstroCLIPArrowConfig) -> None:
         raise ValueError("log_interval must be >= 1.")
     if config.early_stopping_patience < 1:
         raise ValueError("early_stopping_patience must be >= 1.")
+    if config.early_stopping_min_iters < 0:
+        raise ValueError("early_stopping_min_iters must be >= 0.")
 
     if config.ddp_num_gpus < 1:
         raise ValueError("ddp_num_gpus must be >= 1.")
@@ -314,41 +318,65 @@ class AstroCLIPArrowDataModule(L.LightningDataModule):
         ]
         registry = ModalityRegistry(modalities)
 
-        train_tf = EuclidDESIDatasetArrow.data_transforms(
-            norm_type_img="asinh",
-            norm_scaler_img=1.0,
-            norm_const_img=7.603847,
-            norm_type_spec="asinh",
-            norm_scaler_spec=1.0,
-            norm_const_spec=7.956048,
+        train_processors = {
+            "images": EuclidImageProcessor(
+                filters=['VIS', 'Y', 'J', 'H'],
+                spiral=False,
+                stochastic=False,
+                stage="train"
+            ),
+            "spectra": DESISpectrumProcessor(
+                stochastic=False,
+                inverse=False
+            )
+        }
+
+        val_processors = {
+            "images": EuclidImageProcessor(
+                filters=['VIS', 'Y', 'J', 'H'],
+                spiral=False,
+                stochastic=False,
+                stage="val"
+            ),
+            "spectra": DESISpectrumProcessor(
+                stochastic=False,
+                inverse=False
+            )
+        }
+
+        train_tf = MultimodalDatasetArrow.data_transforms(
+            norm_type_images="asinh",
+            norm_scaler_images=1.0,
+            norm_const_images=7.603847,
+            norm_type_spectra="asinh",
+            norm_scaler_spectra=1.0,
+            norm_const_spectra=7.956048,
             stage="train",
         )
 
-        val_tf = EuclidDESIDatasetArrow.data_transforms(
-            norm_type_img="asinh",
-            norm_scaler_img=1.0,
-            norm_const_img=7.603847,
-            norm_type_spec="asinh",
-            norm_scaler_spec=1.0,
-            norm_const_spec=7.956048,
+        val_tf = MultimodalDatasetArrow.data_transforms(
+            norm_type_images="asinh",
+            norm_scaler_images=1.0,
+            norm_const_images=7.603847,
+            norm_type_spectra="asinh",
+            norm_scaler_spectra=1.0,
+            norm_const_spectra=7.956048,
             stage="val",
         )
 
-        self.train_dataset = EuclidDESIDatasetArrow(
+        self.train_dataset = MultimodalDatasetArrow(
             arrow_folder_root=self.config.data_dir,
             split="train",
+            processors=train_processors,
             modality_registry=registry,
-            spiral=False,
-            stochastic=False,
             transform=train_tf,
         )
 
-        self.val_dataset = EuclidDESIDatasetArrow(
+        self.val_dataset = MultimodalDatasetArrow(
             arrow_folder_root=self.config.data_dir,
             split="test",
+            processors=val_processors,
             modality_registry=registry,
-            spiral=False,
-            stochastic=False,
             transform=val_tf,
         )
 
@@ -450,6 +478,13 @@ class AstroClipTrainModule(AstroClipModel):
         self.beta2 = beta2
         self.lr_warmup_steps = lr_warmup_steps
         self.lr_decay_steps = lr_decay_steps
+        
+        # Prevent giant serialization/hanging issues on rank 0 due to module serialization in hparams.yaml
+        self.save_hyperparameters(ignore=["image_encoder", "spectrum_encoder"])
+        for key in ["image_encoder", "spectrum_encoder"]:
+            if hasattr(self, "_hparams") and key in self._hparams:
+                del self._hparams[key]
+                
         self._last_grad_norms = {
             "images": float("nan"),
             "spectra": float("nan"),
@@ -597,6 +632,17 @@ class AstroClipTrainModule(AstroClipModel):
                 "frequency": 1,
             },
         }
+
+
+class MinItersEarlyStopping(EarlyStopping):
+    def __init__(self, min_iters: int = 50000, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.min_iters = min_iters
+
+    def on_validation_end(self, trainer, pl_module):
+        if trainer.global_step < self.min_iters:
+            return
+        super().on_validation_end(trainer, pl_module)
 
 
 class AstroPTStyleCSVCallback(L.Callback):
@@ -968,6 +1014,28 @@ def main():
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     run_logger = configure_training_logger(logs_dir)
     run_logger.info("Logging initialized. Saving logs to: %s", logs_dir / "training.log")
+
+    # Avoid PyTorch Lightning AND dinov2 SLURM environment detection conflict when run
+    # under torchrun.  dinov2's _TorchDistributedEnvironment checks SLURM_JOB_ID first;
+    # if present it enters _set_from_slurm_env() which reads SLURM_PROCID etc.
+    # We must clear ALL SLURM identifiers so both libraries fall through to the
+    # torchrun/preset-env initialization path.
+    if int(config.ddp_num_gpus) > 1 and "SLURM_JOB_ID" in os.environ:
+        run_logger.info(
+            "DDP mode with SLURM detected. Clearing SLURM environment variables to let torchrun/Lightning manage DDP."
+        )
+        for var in [
+            "SLURM_JOB_ID",
+            "SLURM_JOB_NUM_NODES",
+            "SLURM_JOB_NODELIST",
+            "SLURM_NTASKS",
+            "SLURM_PROCID",
+            "SLURM_LOCALID",
+            "SLURM_NODEID",
+            "SLURM_TASKS_PER_NODE",
+        ]:
+            os.environ.pop(var, None)
+
     run_logger.info("Starting AstroCLIP training on CUDA (DDP: True)")
     run_logger.info("Training config:")
     for key, val in asdict(config).items():
@@ -983,12 +1051,25 @@ def main():
     dotenv.load_dotenv(os.path.join(ASTROCLIP_DIR, "astroclip", ".env"))
     root = os.environ.get("ASTROCLIP_ROOT", str(ASTROCLIP_DIR))
 
+    # Prevent dinov2 from initializing its own NCCL process group.
+    # dinov2's setup_and_build_model() calls distributed.enable(overwrite=True)
+    # which runs dist.init_process_group + dist.barrier BEFORE Lightning sets up
+    # DDP, causing NCCL timeouts.  We monkey-patch it to a no-op so Lightning
+    # remains the sole DDP coordinator.
+    import dinov2.distributed as _dinov2_dist
+    _dinov2_dist_enable_orig = _dinov2_dist.enable
+    _dinov2_dist.enable = lambda **kwargs: None
+    run_logger.info("Patched dinov2.distributed.enable to no-op (Lightning manages DDP).")
+
     image_encoder = ImageHead(
         config=os.path.join(root, "astroclip", "astrodino", "config.yaml"),
         model_weights=os.path.join(root, "pretrained", "astrodino.ckpt"),
         save_directory=os.path.join(str(train_dir), "astrodino"),
         freeze_backbone=config.freeze_image_backbone,
     )
+
+    # Restore original in case anything else needs it later.
+    _dinov2_dist.enable = _dinov2_dist_enable_orig
 
     spectrum_encoder = SpectrumHead(
         model_path=os.path.join(root, "pretrained", "specformer.ckpt"),
@@ -1022,7 +1103,8 @@ def main():
 
     lr_monitor = LearningRateMonitor(logging_interval="step")
     ckpt_callback = build_checkpoint_callback(config, ckpt_dir)
-    early_stopping = EarlyStopping(
+    early_stopping = MinItersEarlyStopping(
+        min_iters=int(config.early_stopping_min_iters),
         monitor="val_loss_nologit",
         mode="min",
         patience=max(1, int(config.early_stopping_patience)),
@@ -1110,7 +1192,9 @@ def main():
     )
 
     strategy = config.ddp_strategy
-    if strategy == "ddp" and config.ddp_find_unused_parameters:
+    if devices == 1:
+        strategy = "auto"
+    elif strategy == "ddp" and config.ddp_find_unused_parameters:
         strategy = "ddp_find_unused_parameters_true"
 
     runtime_guard = None

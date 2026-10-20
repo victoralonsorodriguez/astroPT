@@ -247,12 +247,12 @@ def compute_metrics(y_true, y_pred, task_type, target_name):
         diff = y_pred - y_true
         r2 = r2_score(y_true, y_pred)
         rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-        if target_name == 'Z':
+        if target_name in ['Z', 'phz_pp_median_redshift']:
             norm_diff = diff / (1 + y_true)
             bias = np.median(norm_diff) 
             nmad = 1.4826 * np.median(np.abs(norm_diff - np.median(norm_diff)))
             outliers = np.mean(np.abs(norm_diff) > 0.15) * 100
-        elif target_name == 'LOGMSTAR':
+        elif target_name in ['LOGMSTAR', 'phz_pp_median_stellarmass']:
             bias = np.median(diff)      
             nmad = 1.4826 * np.median(np.abs(diff - np.median(diff)))
             outliers = np.mean(np.abs(diff) > 0.25) * 100 
@@ -358,6 +358,12 @@ def main():
             err_vals = np.where(ivar_vals > 0, 1.0 / np.sqrt(ivar_vals.clip(lower=1e-10)), np.inf)
             mask &= (vals > 3.0 * err_vals)
             logger.info(f"Applied dynamic SNR > 3 quality filter for regression target '{config.target}' using '{ivar_col}'.")
+            
+        # Specific quality mask for photometrically derived physical parameters
+        if config.target in ['phz_pp_median_redshift', 'phz_pp_median_stellarmass']:
+            if 'phys_param_flags' in catalog.columns and 'phz_flags' in catalog.columns:
+                mask &= (catalog['phys_param_flags'] == 0) & (catalog['phz_flags'] == 0)
+                logger.info(f"Applied phys_param_flags == 0 and phz_flags == 0 quality filter for '{config.target}'.")
     else:
         task_type = 'classification'
         mask = vals.notna() & (vals != "") & (vals != "N/A")

@@ -85,6 +85,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save_dir", type=str, default=None, help="Plot Saving Directory")
     parser.add_argument("--subsample", type=int, default=None, help="Global limit of points for speed")
     parser.add_argument("--train_name", type=str, default=None, help="Custom title for plots")
+    parser.add_argument("--dim", type=int, default=2, choices=[2, 3], help="Dimensions of UMAP coordinates (2 or 3)")
     
     # Activation Flags (Modular Execution)
     parser.add_argument("--plot_standard", action="store_true", help="Generate physical/chemical property grids")
@@ -402,17 +403,30 @@ def main():
     umap_storage = {}
     for mod, emb_full in raw_data.items():
         if mod == 'targetid': continue
-        logger.info(f"\n--- PRE-COMPUTING UMAP: {mod.upper()} ---")
-        cache_path = save_dir / f"cache_umap_{mod}.npy"
+        logger.info(f"\n--- PRE-COMPUTING UMAP: {mod.upper()} (Dim: {args.dim}) ---")
+        
+        cache_name = f"cache_umap_3d_{mod}.npy" if args.dim == 3 else f"cache_umap_{mod}.npy"
+        cache_path = save_dir / cache_name
+        
         if cache_path.exists():
-            logger.info(f"Loading cached coordinates...")
+            logger.info(f"Loading cached coordinates from {cache_name}...")
             umap_coords = np.load(cache_path)
         else:
             logger.info(f"Computing manifold (this may take 1-5 minutes depending on CPU)...")
-            umap_coords = umap.UMAP(**UMAP_PARAMS).fit_transform(emb_full[valid_idx])
+            custom_params = UMAP_PARAMS.copy()
+            custom_params['n_components'] = args.dim
+            # If random_state is set, n_jobs is overridden by UMAP to 1. To get full multi-core performance
+            # on SLURM, we disable random_state when executing the heavy CPU generation block if requested,
+            # or keep it consistent. Let's keep custom_params to use n_jobs=-1
+            # (Note: we can override random_state=None for speed if desired, but let's keep exact configurations)
+            umap_coords = umap.UMAP(**custom_params).fit_transform(emb_full[valid_idx])
             np.save(cache_path, umap_coords)
             logger.info(f"UMAP coordinates cached to {cache_path.name}")
         umap_storage[mod] = umap_coords
+
+    if args.dim == 3 and not (args.plot_standard or args.plot_visual or args.plot_spectral):
+        logger.info("3D UMAP Cache Generation Complete. Exiting cleanly.")
+        sys.exit(0)
 
     # 2. PHASE 2: Plotting by DASHBOARD TYPE (Comparative workflow)
     # Order: Morphology -> Physics -> Chemistry -> Visual -> Spectral

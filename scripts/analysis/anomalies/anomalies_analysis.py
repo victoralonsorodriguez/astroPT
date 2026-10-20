@@ -45,7 +45,7 @@ from sklearn.ensemble import IsolationForest
 from sklearn.neighbors import LocalOutlierFactor, NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 from sklearn.covariance import LedoitWolf
-from sklearn.manifold import TSNE
+import umap
 from sklearn.cluster import DBSCAN
 
 from astropt.dataloader_multimodal import MultimodalDatasetArrow
@@ -61,6 +61,36 @@ logging.basicConfig(
     stream=sys.stdout
 )
 logger = logging.getLogger("AstroPT-AnomalyHunter")
+
+def find_id_index(ids_array: np.ndarray, target_id: float) -> Optional[int]:
+    """Finds the index of a TargetID in the IDs array, handling float64 precision issues."""
+    # Try exact match first
+    matches = np.where(ids_array.astype(int) == int(target_id))[0]
+    if len(matches) > 0:
+        return int(matches[0])
+    
+    # Try float64 distance matching
+    diffs = np.abs(ids_array.astype(np.float64) - float(target_id))
+    min_idx = np.argmin(diffs)
+    if diffs[min_idx] < 16.0:
+        return int(min_idx)
+        
+    return None
+
+def find_arrow_index(ds_ids: np.ndarray, target_id: float) -> Optional[int]:
+    """Finds the index of a TargetID in the Arrow dataset, handling float64 rounding in target_id."""
+    # Try exact match
+    matches = np.where(ds_ids == int(target_id))[0]
+    if len(matches) > 0:
+        return int(matches[0])
+    
+    # Try float64 distance matching
+    diffs = np.abs(ds_ids.astype(np.float64) - float(target_id))
+    min_idx = np.argmin(diffs)
+    if diffs[min_idx] < 16.0:
+        return int(min_idx)
+        
+    return None
 
 def parse_args() -> argparse.Namespace:
     """Parses command line arguments."""
@@ -97,7 +127,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base_modality", type=str, default="all", 
                         help="Base embedding modality for general outlier detectors, or 'all' to run on all available modalities dynamically.")
     parser.add_argument("--plot_projection", action="store_true", default=True,
-                        help="Generate a 2D t-SNE plot highlighting anomaly locations")
+                        help="Generate a 2D UMAP plot highlighting anomaly locations")
     parser.add_argument("--anchor_ids", type=int, nargs="+", default=None,
                         help="Optional TargetIDs of reference anchors for few-shot cosine similarity detection")
     parser.add_argument("--similarity_threshold", type=float, default=0.85,
@@ -436,7 +466,7 @@ def calculate_anomaly_scores(
         
     df_scores = pd.DataFrame({"TargetID": ids})
     
-    # Dictionary to keep active 2D matrices for t-SNE / further analysis
+    # Dictionary to keep active 2D matrices for UMAP / further analysis
     feature_matrices = {}
     
     # --- 1. Cross-Modal Cosine Gap ---
@@ -574,14 +604,14 @@ def calculate_anomaly_scores(
 # Visualization & Scientific Dashboarding
 # ---------------------------------------------------------------------------
 
-def generate_tSNE_plot(
+def generate_UMAP_plot(
     X: np.ndarray, 
     top_indices: np.ndarray, 
     uwi_scores: np.ndarray,
     save_path: Path
 ):
-    """Generates a 2D t-SNE plot highlighting where top anomalies lie in latent space."""
-    logger.info("Generating t-SNE projection for visualization...")
+    """Generates a 2D UMAP plot highlighting where top anomalies lie in latent space."""
+    logger.info("Generating UMAP projection for visualization...")
     
     # Downsample background points for plotting speed if dataset is huge
     max_bg = 15000
@@ -596,8 +626,16 @@ def generate_tSNE_plot(
         
     X_plot = X[all_plot_idx]
     
-    tsne = TSNE(n_components=2, perplexity=30, random_state=42, max_iter=1000, n_jobs=-1)
-    X_embedded = tsne.fit_transform(X_plot)
+    reducer = umap.UMAP(
+        n_neighbors=30,
+        min_dist=0.1,
+        n_components=2,
+        metric="cosine",
+        random_state=61,
+        verbose=True,
+        n_jobs=-1
+    )
+    X_embedded = reducer.fit_transform(X_plot)
     
     # Map raw indices to plot indices
     plot_idx_map = {idx: i for i, idx in enumerate(all_plot_idx)}
@@ -633,15 +671,15 @@ def generate_tSNE_plot(
             bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.8, ec="black", lw=0.5)
         )
         
-    ax.set_title("AstroPT Joint Latent Space Projection (t-SNE)", fontsize=14, fontweight="bold")
-    ax.set_xlabel("t-SNE Dimension 1", fontsize=12)
-    ax.set_ylabel("t-SNE Dimension 2", fontsize=12)
+    ax.set_title("AstroPT Joint Latent Space Projection (UMAP)", fontsize=14, fontweight="bold")
+    ax.set_xlabel("UMAP Dimension 1", fontsize=12)
+    ax.set_ylabel("UMAP Dimension 2", fontsize=12)
     ax.grid(True, alpha=0.15)
     ax.legend(loc="upper right", framealpha=0.9, fontsize=11)
     
     plt.savefig(save_path, bbox_inches="tight")
     plt.close()
-    logger.info(f"Saved t-SNE plot to {save_path}")
+    logger.info(f"Saved UMAP plot to {save_path}")
 
 
 MAIN_LINES = {
@@ -808,12 +846,12 @@ def generate_anomaly_report_dashboard(
             
             # Retrieve processed batch entry from dataloader
             ds_ids = np.array(ds.ds['targetid'])
-            matches = np.where(ds_ids == tid)[0]
-            if len(matches) == 0:
+            idx = find_arrow_index(ds_ids, tid)
+            if idx is None:
                 logger.warning(f"ID {tid} not found in active dataset split. Skipping dashboard sheet.")
                 continue
                 
-            sample = ds[int(matches[0])]
+            sample = ds[idx]
             
             # Fetch FITS metadata using the same template/helpers as similarity_search.py
             meta_str, z_val = get_morphological_meta_str(tid)
@@ -831,7 +869,7 @@ def generate_anomaly_report_dashboard(
             ax_spec_red = fig.add_subplot(gs[2, :])
             
             # Load the raw Arrow record from the dataset to ensure original physical scaling
-            raw_record = ds.ds[int(matches[0])]
+            raw_record = ds.ds[idx]
             
             # 1. Optical RGB Euclid Image using Lupton asinh scaling (VIS+NISP)
             has_image = False
@@ -1048,7 +1086,9 @@ def main():
         # Align indices of embeddings correctly using the unsorted active IDs list
         all_ids_raw = np.load(embeddings_dir / "ids.npy")
         if allowed_ids is not None:
-            active_ids_unsorted = all_ids_raw[np.isin(all_ids_raw.astype(int), list(allowed_ids))]
+            allowed_floats = np.array(list(allowed_ids), dtype=np.float64)
+            keep_mask = np.isin(all_ids_raw.astype(np.float64), allowed_floats)
+            active_ids_unsorted = all_ids_raw[keep_mask]
         else:
             active_ids_unsorted = all_ids_raw
             
@@ -1089,14 +1129,19 @@ def main():
         if args.plot_projection:
             X_base = feature_matrices[modality]
             top_tids = df_top_physical.TargetID.values
-            top_indices = np.array([np.where(active_ids_unsorted == tid)[0][0] for tid in top_tids if tid in active_ids_unsorted])
+            top_indices = []
+            for tid in top_tids:
+                idx = find_id_index(active_ids_unsorted, tid)
+                if idx is not None:
+                    top_indices.append(idx)
+            top_indices = np.array(top_indices)
             
-            tsne_path = save_dir / f"latent_tsne_{modality}.png"
-            generate_tSNE_plot(
+            umap_path = save_dir / f"latent_umap_{modality}.png"
+            generate_UMAP_plot(
                 X_base, 
                 top_indices=top_indices, 
                 uwi_scores=df_top_physical.Unified_Weirdness_Index.values[:len(top_indices)], 
-                save_path=tsne_path
+                save_path=umap_path
             )
             
         dashboard_pdf_path = save_dir / f"anomaly_hunter_report_{modality}.pdf"

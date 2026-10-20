@@ -21,6 +21,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import fields
+from contextlib import nullcontext
 
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -46,6 +47,64 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AstroPT-SimilaritySearch")
 
+# Configure Matplotlib Headless Mode immediately to prevent GUI thread issues in SLURM
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# Check LaTeX availability and configure rcParams
+usetex_val = True
+try:
+    plt.rcParams['text.latex.preamble'] = r'\usepackage{amsmath}'
+    plt.rc('text', usetex=True)
+except Exception as e:
+    logger.warning(f"LaTeX is not available, falling back to plain text formatting: {e}")
+    plt.rc('text', usetex=False)
+    usetex_val = False
+
+def clean_latex(text: str) -> str:
+    """Removes LaTeX command structures if LaTeX rendering is disabled."""
+    if usetex_val:
+        return text
+    import re
+    cleaned = text
+    cleaned = re.sub(r'\\textbf\{([^}]*)\}', r'\1', cleaned)
+    cleaned = re.sub(r'\\text\{([^}]*)\}', r'\1', cleaned)
+    cleaned = re.sub(r'\\bm\{([^}]*)\}', r'\1', cleaned)
+    cleaned = re.sub(r'\\alpha', 'alpha', cleaned)
+    cleaned = re.sub(r'\\beta', 'beta', cleaned)
+    cleaned = re.sub(r'\\sigma', 'sigma', cleaned)
+    cleaned = re.sub(r'\\theta', 'theta', cleaned)
+    cleaned = re.sub(r'\\cos', 'cos', cleaned)
+    cleaned = re.sub(r'\\circ', ' deg', cleaned)
+    cleaned = re.sub(r'\\AA', 'A', cleaned)
+    cleaned = re.sub(r'\\$', '', cleaned)
+    cleaned = cleaned.replace(r'\#', '#').replace(r'\_', '_').replace(r'\^', '^')
+    return cleaned
+
+
+class CombinedDatasetWrapper:
+    def __init__(self, train_ds, val_ds):
+        self.train_ds = train_ds
+        self.val_ds = val_ds
+        self.train_ids = np.array(train_ds.ds['targetid'], dtype=np.int64) if len(train_ds) > 0 else np.array([], dtype=np.int64)
+        self.val_ids = np.array(val_ds.ds['targetid'], dtype=np.int64) if len(val_ds) > 0 else np.array([], dtype=np.int64)
+        self.combined_ids = np.concatenate([self.train_ids, self.val_ids])
+        
+    @property
+    def ds(self):
+        return self
+        
+    def __getitem__(self, key):
+        if key == 'targetid':
+            return self.combined_ids
+        idx = int(key)
+        n_train = len(self.train_ids)
+        if idx < n_train:
+            return self.train_ds.ds[idx]
+        else:
+            return self.val_ds.ds[idx - n_train]
+
 
 def parse_args() -> argparse.Namespace:
     """Parses command line arguments."""
@@ -62,14 +121,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", type=str, default=None, 
                         help="Saving directory for similarity search dashboards")
     
-    parser.add_argument("--query_id", type=int, required=True, 
+    parser.add_argument("--query_id", type=int, default=None, 
                         help="TargetID of the query galaxy")
+    parser.add_argument("--query_fits", type=str, default=None,
+                        help="Path to a custom FITS file or directory of FITS files to query")
+    parser.add_argument("--output_csv", type=str, default=None,
+                        help="Optional CSV filename to save similarity search results")
     parser.add_argument("--k", type=int, default=5, 
                         help="Number of nearest neighbors to retrieve")
     parser.add_argument("--batch_size", type=int, default=16, 
                         help="Batch size for dataloader")
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.query_id is None and args.query_fits is None:
+        parser.error("Either --query_id or --query_fits must be provided.")
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -104,23 +170,81 @@ def plot_spectral_lines(ax, min_wl, max_wl, z):
                     color='royalblue', va='top', ha='right', fontsize=10, alpha=1, fontweight='bold')
             counter += 1
 
-def make_rgb_lupton(image_tensor: np.ndarray, Q: float = 12.0, stretch: float = 0.5, m: float = 0.0) -> np.ndarray:
-    """Lupton et al. (2004) algorithm implementation."""
-    I = np.mean(image_tensor, axis=0)
-    I = I - m
-    I = np.maximum(I, 1e-10)
-    f_I = np.arcsinh(Q * stretch * I) / Q
-    scale_factor = f_I / I
-    rgb_out = image_tensor * scale_factor[np.newaxis, :, :]
+def make_rgb_lupton(image_stack: np.ndarray, Q: float = 12.0, stretch: float = 0.5, m: float = 0.0) -> np.ndarray:
+    """Lupton et al. (2004) asinh scaling."""
+    intensity = np.mean(image_stack, axis=0) - m
+    intensity = np.maximum(intensity, 1e-10)
+
+    f_I = np.arcsinh(Q * stretch * intensity) / Q
+    scale_factor = f_I / intensity
+
+    rgb_out = image_stack * scale_factor[np.newaxis, :, :]
     max_rgb = np.percentile(rgb_out, 99.5)
     if max_rgb > 0:
         rgb_out = rgb_out / max_rgb
+
     rgb_out = np.clip(rgb_out, 0, 1)
     return rgb_out.transpose(1, 2, 0)
 
 
+def make_lupton_composite(
+    vis: np.ndarray,
+    y_band: np.ndarray,
+    j_band: np.ndarray,
+    h_band: np.ndarray,
+    Q: float = 12.0,
+    stretch: float = 0.5,
+    rgb_weights: tuple = (1.2, 1.3, 1.0),
+) -> np.ndarray:
+    """
+    Lupton 2004 composite for 4 Euclid bands (VIS/Y/J/H):
+      R = H        * w_r
+      G = (J+Y)/2  * w_g
+      B = VIS      * w_b
+    Falls back to 3-band if H is unavailable.
+    """
+    vis_c = np.nan_to_num(vis,    nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+    y_c   = np.nan_to_num(y_band, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+    j_c   = np.nan_to_num(j_band, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+    h_c   = np.nan_to_num(h_band, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
+    has_h = h_c.size > 0 and np.any(h_c > 0)
+
+    if has_h:
+        raw_stack = np.stack([vis_c, h_c, j_c, y_c], axis=0)
+    else:
+        raw_stack = np.stack([vis_c, j_c, y_c], axis=0)
+
+    bg_val = np.percentile(raw_stack, 50, axis=(1, 2), keepdims=True)
+    raw_bg = raw_stack - bg_val
+
+    normed_channels = []
+    for c in range(raw_bg.shape[0]):
+        v_max = np.percentile(np.abs(raw_bg[c]), 99.5)
+        if v_max <= 0:
+            v_max = 1.0
+        normed_channels.append(np.clip(raw_bg[c] / v_max, 0, 100))
+    raw_norm = np.stack(normed_channels)
+
+    w_r, w_g, w_b = rgb_weights
+
+    if has_h:
+        vis_ch, h_ch, j_ch, y_ch = raw_norm[0], raw_norm[1], raw_norm[2], raw_norm[3]
+        r = h_ch * w_r
+        g = ((j_ch + y_ch) / 2.0) * w_g
+        b = vis_ch * w_b
+    else:
+        vis_ch, j_ch, y_ch = raw_norm[0], raw_norm[1], raw_norm[2]
+        r = j_ch * w_r
+        g = y_ch * w_g
+        b = vis_ch * w_b
+
+    rgb_input = np.stack([r, g, b], axis=0)
+    return make_rgb_lupton(rgb_input, Q=Q, stretch=stretch)
+
+
 def extract_raw_rgb(raw_record: dict) -> Optional[np.ndarray]:
-    """Safely extract and reconstruct VIS+NISP false color RGB using Lupton."""
+    """Safely extract and reconstruct VIS+NISP false color RGB."""
     def get_raw(k):
         try:
             val = raw_record[k]
@@ -131,65 +255,362 @@ def extract_raw_rgb(raw_record: dict) -> Optional[np.ndarray]:
     vis = get_raw('image_vis')
     y = get_raw('image_nisp_y')
     j = get_raw('image_nisp_j')
-    h = get_raw('image_nisp_h')
     
     if vis.size == 0:
         return None
         
-    h = h if h.size > 0 else np.zeros_like(vis)
-    j = j if j.size > 0 else np.zeros_like(vis)
-    y = y if y.size > 0 else np.zeros_like(vis)
-    
-    raw_stack = np.stack([vis, h, j, y], axis=0)  # (4, H, W)
-    bg_val = np.percentile(raw_stack, 50, axis=(1,2), keepdims=True)
-    raw_bg = raw_stack - bg_val
-    
-    raw_rgb_stack = []
-    for c in range(raw_bg.shape[0]):
-        v_max = np.percentile(np.abs(raw_bg[c]), 99.5)
-        if v_max <= 0: v_max = 1.0
-        r_ch = np.clip(raw_bg[c] / v_max, 0, 100)
-        raw_rgb_stack.append(r_ch)
-    raw_norm = np.stack(raw_rgb_stack)
-    
-    RGB_WEIGHTS = [1.2, 1.3, 1.0]
-    vis_ch, h_ch, j_ch, y_ch = raw_norm[0], raw_norm[1], raw_norm[2], raw_norm[3]
-    r = h_ch * RGB_WEIGHTS[0]
-    g = ((j_ch + y_ch) / 2.0) * RGB_WEIGHTS[1]
-    b = vis_ch * RGB_WEIGHTS[2]
-    
-    rgb_input = np.stack([r, g, b], axis=0)
-    return make_rgb_lupton(rgb_input, Q=12.0, stretch=0.5)
+    try:
+        h_val = raw_record.get('image_nisp_h', None)
+        h = np.array(h_val, dtype=np.float32) if h_val is not None else np.zeros_like(vis)
+    except Exception:
+        h = np.zeros_like(vis)
+        
+    return make_lupton_composite(vis, y, j, h)
 
 
-def plot_spectrum_into_axes(ax_blue, ax_red, raw_record: dict, tid: int, z_val: Optional[float] = None):
+def plot_spectrum_into_axes(ax_blue, ax_red, raw_record: Optional[dict], tid: Optional[int], z_val: Optional[float] = None):
     """Plots DESI spectrum split in Blue and Red channels into the provided axes."""
-    if raw_record.get('spectrum_flux') is not None:
+    if raw_record is not None and raw_record.get('spectrum_flux') is not None:
         spec_gt = np.array(raw_record['spectrum_flux']).flatten()
         wave_ang = np.array(raw_record['spectrum_wave']).flatten()
         
-        w_min, w_max = wave_ang.min(), wave_ang.max()
-        w_mid = (w_min + w_max) / 2
-        
         # Blue Channel
         ax_blue.plot(wave_ang, spec_gt, 'k-', lw=1, alpha=0.8)
-        ax_blue.set_xlim(w_min, w_mid)
+        ax_blue.set_xlim(wave_ang.min(), (wave_ang.min() + wave_ang.max()) / 2)
         ax_blue.set_title(r"\textbf{Spectrum (Blue Channel)}", fontsize=11, fontweight='bold')
         ax_blue.set_ylabel(r"Flux", fontsize=9)
         if z_val is not None:
-            plot_spectral_lines(ax_blue, w_min, w_mid, z_val)
+            plot_spectral_lines(ax_blue, wave_ang.min(), (wave_ang.min() + wave_ang.max()) / 2, z_val)
         
         # Red Channel
         ax_red.plot(wave_ang, spec_gt, 'k-', lw=1, alpha=0.8)
-        ax_red.set_xlim(w_mid, w_max)
+        ax_red.set_xlim((wave_ang.min() + wave_ang.max()) / 2, wave_ang.max())
         ax_red.set_title(r"\textbf{Spectrum (Red Channel)}", fontsize=11, fontweight='bold')
         ax_red.set_ylabel(r"Flux", fontsize=9)
         ax_red.set_xlabel(r"Observed Wavelength [\AA]", fontsize=10, fontweight='bold')
         if z_val is not None:
-            plot_spectral_lines(ax_red, w_mid, w_max, z_val)
+            plot_spectral_lines(ax_red, (wave_ang.min() + wave_ang.max()) / 2, wave_ang.max(), z_val)
     else:
-        ax_blue.text(0.5, 0.5, "DESISpectrum not found", ha='center', va='center', fontsize=12)
+        ax_blue.text(0.5, 0.5, "DESISpectrum not found / available", ha='center', va='center', fontsize=12)
+        ax_blue.axis('off')
         ax_red.axis('off')
+
+
+def extract_rgb_from_fits_file(fits_path: Path) -> Optional[np.ndarray]:
+    from astropy.io import fits
+    try:
+        with fits.open(fits_path) as hdul:
+            data = None
+            for hdu in hdul:
+                if hdu.data is not None:
+                    data = hdu.data
+                    break
+        if data is None:
+            logger.error(f"FITS file {fits_path} contains no image data in any HDU.")
+            return None
+        if data.ndim == 2:
+            data = np.stack([data, data, data, data], axis=0)
+        elif data.ndim != 3:
+            logger.error(f"FITS data in {fits_path} has invalid dimensions: {data.shape} (must be 2D or 3D)")
+            return None
+            
+        c, h, w = data.shape
+        if h > 224 or w > 224:
+            sh = (h - 224) // 2
+            sw = (w - 224) // 2
+            data = data[:, sh:sh+224, sw:sw+224]
+            
+        bg_val = np.percentile(data, 50, axis=(1,2), keepdims=True)
+        raw_bg = data - bg_val
+        
+        vis_ch = raw_bg[0]
+        j_ch = raw_bg[2]
+        y_ch = raw_bg[3]
+        
+        return make_hsl_composite(vis_ch, y_ch, j_ch)
+    except Exception as e:
+        logger.error(f"Error extracting RGB from fits {fits_path}: {e}")
+        return None
+
+
+def get_embedding_from_fits(fits_path: Path, model: nn.Module, device: torch.device, training_config: Any = None) -> Optional[torch.Tensor]:
+    from astropy.io import fits
+    from astropt.processors.image import EuclidImageProcessor
+    try:
+        with fits.open(fits_path) as hdul:
+            data = None
+            for hdu in hdul:
+                if hdu.data is not None:
+                    data = hdu.data
+                    break
+        if data is None:
+            logger.error(f"FITS file {fits_path} contains no image data in any HDU for embedding.")
+            return None
+        if data.ndim == 2:
+            data = np.stack([data, data, data, data], axis=0)
+        elif data.ndim != 3:
+            logger.error(f"FITS data in {fits_path} has invalid dimensions: {data.shape} for embedding.")
+            return None
+            
+        if data.shape[0] == 4:
+            data = data[[0, 3, 2, 1]]
+            
+        c, h, w = data.shape
+        if h > 224 or w > 224:
+            sh = (h - 224) // 2
+            sw = (w - 224) // 2
+            data = data[:, sh:sh+224, sw:sw+224]
+            
+        cropped_tensor = torch.from_numpy(data.copy()).to(torch.float32)
+        p_size = 8
+        c, h, w = cropped_tensor.shape
+        patch_galaxy = cropped_tensor.reshape(c, h // p_size, p_size, w // p_size, p_size)
+        patch_galaxy = patch_galaxy.permute(1, 3, 2, 4, 0)
+        patch_galaxy = patch_galaxy.reshape((h // p_size) * (w // p_size), p_size * p_size * c)
+        
+        # Apply normalization according to config
+        norm_type = "z_score"
+        norm_scaler = 1.0
+        norm_const = 1.0
+        if training_config is not None:
+            norm_type = getattr(training_config, 'images_norm_type', 'z_score')
+            norm_scaler = getattr(training_config, 'images_norm_scaler', 1.0)
+            norm_const = getattr(training_config, 'images_norm_const', 1.0)
+
+        if norm_type == "z_score":
+            std, mean = torch.std_mean(patch_galaxy, dim=1, keepdim=True)
+            patch_galaxy = (patch_galaxy - mean) / (std + 1e-8)
+        elif norm_type == "asinh":
+            patch_galaxy = torch.asinh(patch_galaxy / norm_scaler) / norm_const
+        elif norm_type == "constant":
+            patch_galaxy = patch_galaxy / norm_const
+        
+        processor = EuclidImageProcessor(spiral=True)
+        patch_galaxy = processor._spiralise(patch_galaxy)
+        
+        positions = torch.arange(patch_galaxy.shape[0], dtype=torch.long)
+        
+        model_dtype = next(model.parameters()).dtype
+        flux_batch = patch_galaxy.unsqueeze(0).to(device=device, dtype=model_dtype)
+        pos_batch = positions.unsqueeze(0).to(device=device, dtype=torch.long)
+        
+        inputs = {"EuclidImage": flux_batch, "EuclidImage_positions": pos_batch}
+        
+        ctx = torch.amp.autocast(device_type="cuda", dtype=model_dtype) if (device.type == "cuda" and model_dtype == torch.bfloat16) else nullcontext()
+        with torch.no_grad(), ctx:
+            emb = model.get_embeddings(inputs, draw_from_centre=False)
+            
+        pooled_emb = emb["EuclidImage"].mean(dim=1).squeeze(0)
+        return pooled_emb
+    except Exception as e:
+        logger.error(f"Error extracting embedding from fits {fits_path}: {e}")
+        return None
+
+
+def extract_and_search_fits(fits_file: Path, model: nn.Module, device: torch.device, norm_X: np.ndarray, ids: np.ndarray, ds: Any, ds_ids: np.ndarray, fits_indexed: pd.DataFrame, save_dir: Path, args: argparse.Namespace, training_config: Any = None) -> Dict[str, Any]:
+    query_name = fits_file.stem
+    logger.info(f"Processing FITS Query: {fits_file.name}")
+    
+    query_rgb = extract_rgb_from_fits_file(fits_file)
+    query_emb = get_embedding_from_fits(fits_file, model, device, training_config)
+    if query_emb is None:
+        logger.warning(f"Could not extract embedding for {fits_file.name}, skipping.")
+        return {}
+        
+    query_emb_np = query_emb.cpu().numpy()
+    norm_query = query_emb_np / (np.linalg.norm(query_emb_np) + 1e-8)
+    sims = np.dot(norm_X, norm_query)
+    
+    top_indices = np.argsort(sims)[::-1][:args.k]
+    top_ids = ids[top_indices]
+    top_sims = sims[top_indices]
+    
+    logger.info(f"Top {args.k} Neighbors for FITS Query {fits_file.name}:")
+    for idx, (tid, sim) in enumerate(zip(top_ids, top_sims)):
+        logger.info(f"  Rank #{idx+1}: TargetID={tid} | Cosine Similarity={sim:.4%}")
+        
+    pdf_path = save_dir / f"similarity_search_{query_name}.pdf"
+    logger.info(f"Generating PDF Similarity Search Report at: {pdf_path}")
+    
+    def get_morphological_meta_str(tid):
+        if tid in fits_indexed.index:
+            meta = fits_indexed.loc[tid]
+            ra_val = meta.get('RA', None)
+            dec_val = meta.get('DEC', None)
+            coords_str = f"${ra_val:.6f}^\\circ, {dec_val:.6f}^\\circ$" if (ra_val is not None and not pd.isna(ra_val)) else "N/A"
+            z_val = meta.get('Z', None)
+            z_str = f"{z_val:.4f}" if (z_val is not None and not pd.isna(z_val)) else "N/A"
+            logmstar_val = meta.get('LOGMSTAR', None)
+            mstar = f"$10^{{{logmstar_val:.2f}}} \\text{{ M}}_\\odot$" if (logmstar_val is not None and not pd.isna(logmstar_val)) else "N/A"
+            logsfr_val = meta.get('LOGSFR', None)
+            sfr = f"${10**logsfr_val:.3f} \\text{{ M}}_\\odot/\\text{{yr}}$" if (logsfr_val is not None and not pd.isna(logsfr_val)) else "N/A"
+            spectype = str(meta.get('SPECTYPE', 'N/A'))
+            sersic_n_val = meta.get('sersic_sersic_vis_index', None)
+            n_str = f"{sersic_n_val:.2f}" if (sersic_n_val is not None and not pd.isna(sersic_n_val)) else "N/A"
+            sersic_re_val = meta.get('sersic_sersic_vis_radius', None)
+            re_str = f"{sersic_re_val:.3f}''" if (sersic_re_val is not None and not pd.isna(sersic_re_val)) else "N/A"
+            ba_val = meta.get('sersic_sersic_vis_axis_ratio', None)
+            ba_str = f"{ba_val:.3f}" if (ba_val is not None and not pd.isna(ba_val)) else "N/A"
+            vis_flux_val = meta.get('flux_vis_1fwhm_aper', None)
+            vis_flux_str = f"{vis_flux_val:.2f}" if (vis_flux_val is not None and not pd.isna(vis_flux_val)) else "N/A"
+            meta_str = (
+                f"\\textbf{{Coords}}: {coords_str}\n"
+                f"\\textbf{{Z}}: {z_str}\n"
+                f"\\textbf{{$M_*$}}: {mstar}\n"
+                f"\\textbf{{SFR}}: {sfr}\n"
+                f"\\textbf{{Spectype}}: {spectype}\n"
+                f"\\textbf{{VIS Flux}}: {vis_flux_str}\n"
+                f"\\textbf{{Sersic n}}: {n_str}\n"
+                f"\\textbf{{Radius $R_{{eff}}$}}: {re_str}\n"
+                f"\\textbf{{Axis Ratio}}: {ba_str}"
+            )
+            return meta_str.replace("_", "\\_"), z_val
+        return f"\\textbf{{ID}}: {tid}\n(No metadata)", None
+
+    def get_spectroscopic_meta_str(tid):
+        if tid in fits_indexed.index:
+            meta = fits_indexed.loc[tid]
+            ha_f = meta.get('HALPHA_FLUX', None)
+            hb_f = meta.get('HBETA_FLUX', None)
+            oiii_f = meta.get('OIII_5007_FLUX', None)
+            oii_f = meta.get('OII_3726_FLUX', None)
+            ha_ew = meta.get('HALPHA_EW', None)
+            hb_ew = meta.get('HBETA_EW', None)
+            oii_ew = meta.get('OII_3726_EW', None)
+            ha_sig = meta.get('HALPHA_SIGMA', None)
+            snr_r = meta.get('SNR_SPEC_R', None)
+            snr_z = meta.get('SNR_SPEC_Z', None)
+            def fmt_flux(v): return f"{v:.2f}" if (v is not None and not pd.isna(v)) else "N/A"
+            def fmt_ew(v): return f"{v:.2f} \\AA" if (v is not None and not pd.isna(v)) else "N/A"
+            def fmt_val(v, unit=""): return f"{v:.1f}{unit}" if (v is not None and not pd.isna(v)) else "N/A"
+            stats_text = (
+                f"\\textbf{{Spectral Line Fluxes}}:\n"
+                f"  - H$\\alpha$ Flux: {fmt_flux(ha_f)}\n"
+                f"  - H$\\beta$ Flux: {fmt_flux(hb_f)}\n"
+                f"  - [O III] 5007 Flux: {fmt_flux(oiii_f)}\n"
+                f"  - [O II] 3726 Flux: {fmt_flux(oii_f)}\n\n"
+                f"\\textbf{{Equivalent Widths}}:\n"
+                f"  - H$\\alpha$ EW: {fmt_ew(ha_ew)}\n"
+                f"  - H$\\beta$ EW: {fmt_ew(hb_ew)}\n"
+                f"  - [O II] 3726 EW: {fmt_ew(oii_ew)}\n\n"
+                f"\\textbf{{Spectra Quality}}:\n"
+                f"  - H$\\alpha$ Width $\\sigma$: {fmt_val(ha_sig, ' km/s')}\n"
+                f"  - SNR Spec R: {fmt_val(snr_r)} | SNR Spec Z: {fmt_val(snr_z)}"
+            )
+            return stats_text.replace("_", "\\_")
+        return "\\textbf{Spectra data missing}"
+
+    from matplotlib.backends.backend_pdf import PdfPages
+    with PdfPages(pdf_path) as pdf:
+        # PAGE 1: Query Profile
+        fig = plt.figure(figsize=(20, 14), dpi=150)
+        gs = gridspec.GridSpec(3, 3, height_ratios=[2, 1, 1], width_ratios=[1, 1.1, 0.9], hspace=0.4, wspace=0.3)
+        ax_meta = fig.add_subplot(gs[0, 0])
+        ax_img = fig.add_subplot(gs[0, 1])
+        ax_stats = fig.add_subplot(gs[0, 2])
+        ax_spec_blue = fig.add_subplot(gs[1, :])
+        ax_spec_red = fig.add_subplot(gs[2, :])
+        
+        ax_meta.axis('off')
+        query_meta = (
+            f"\\textbf{{Query FITS}}: {fits_file.name}\n"
+            f"\\textbf{{Bands}}: VIS, Y, J, H\n"
+            f"\\textbf{{Dimensions}}: 224x224 (cropped)"
+        )
+        ax_meta.text(0.5, 0.95, clean_latex(query_meta), transform=ax_meta.transAxes, fontsize=14, linespacing=1.8, ha='center', va='top', bbox=dict(boxstyle="round,pad=0.8", fc="ivory", alpha=0.95, ec="darkgrey", lw=1.0))
+        ax_meta.set_title(clean_latex(r"\textbf{Physical and Morphological properties}"), fontsize=16, fontweight='bold', color='navy', pad=15)
+        
+        if query_rgb is not None:
+            ax_img.imshow(query_rgb, origin='lower')
+        else:
+            ax_img.text(0.5, 0.5, "EuclidImage missing", ha='center', va='center')
+        ax_img.axis('off')
+        
+        ax_stats.axis('off')
+        ax_stats.text(0.5, 0.95, clean_latex("\\textbf{Spectroscopic properties}:\nNot available for custom FITS query."), transform=ax_stats.transAxes, fontsize=14, linespacing=1.6, ha='center', va='top', bbox=dict(boxstyle="round,pad=0.8", fc="aliceblue", alpha=0.95, ec="steelblue", lw=1.0))
+        ax_stats.set_title(clean_latex(r"\textbf{Spectroscopic properties}"), fontsize=16, fontweight='bold', color='steelblue', pad=15)
+        
+        ax_spec_blue.text(0.5, 0.5, "Spectrum not available for custom query", ha='center', va='center', fontsize=14)
+        ax_spec_blue.axis('off')
+        ax_spec_red.axis('off')
+        
+        plt.suptitle(clean_latex(rf"\textbf{{AstroPT similarity search: Custom Query ({fits_file.name})}}"), fontsize=22, fontweight='bold', y=0.98)
+        pdf.savefig()
+        plt.close()
+        
+        # PAGE 2: Morphological Grid
+        fig, axes = plt.subplots(2, 3, figsize=(20, 12), dpi=150)
+        fig.subplots_adjust(hspace=0.3, wspace=0.2)
+        ax_q = axes[0, 0]
+        if query_rgb is not None:
+            ax_q.imshow(query_rgb, origin='lower')
+        ax_q.axis('off')
+        ax_q.patch.set_edgecolor('navy')
+        ax_q.patch.set_linewidth(3)
+        
+        for idx, tid in enumerate(top_ids[:5]):
+            row_ax = (idx + 1) // 3
+            col_ax = (idx + 1) % 3
+            ax_n = axes[row_ax, col_ax]
+            n_matches = np.where(ds_ids == tid)[0]
+            n_rgb = None
+            if len(n_matches) > 0:
+                n_rec = ds.ds[int(n_matches[0])]
+                n_rgb = extract_raw_rgb(n_rec)
+            if n_rgb is not None:
+                ax_n.imshow(n_rgb, origin='lower')
+            else:
+                ax_n.text(0.5, 0.5, f"Image not found | ID: {tid}", ha='center', va='center')
+            ax_n.axis('off')
+            
+        plt.suptitle(clean_latex(r"\textbf{Euclid Morphological Neighbors}"), fontsize=22, fontweight='bold', y=0.98)
+        pdf.savefig()
+        plt.close()
+        
+        # PAGES 3-7: Detailed profiles
+        for idx, (tid, sim) in enumerate(zip(top_ids, top_sims)):
+            n_matches = np.where(ds_ids == tid)[0]
+            if len(n_matches) == 0:
+                continue
+            n_rec = ds.ds[int(n_matches[0])]
+            n_rgb = extract_raw_rgb(n_rec)
+            n_meta, n_z = get_morphological_meta_str(tid)
+            n_spec_meta = get_spectroscopic_meta_str(tid)
+            
+            fig = plt.figure(figsize=(20, 14), dpi=150)
+            gs = gridspec.GridSpec(3, 3, height_ratios=[2, 1, 1], width_ratios=[1, 1.1, 0.9], hspace=0.4, wspace=0.3)
+            ax_meta = fig.add_subplot(gs[0, 0])
+            ax_img = fig.add_subplot(gs[0, 1])
+            ax_stats = fig.add_subplot(gs[0, 2])
+            ax_spec_blue = fig.add_subplot(gs[1, :])
+            ax_spec_red = fig.add_subplot(gs[2, :])
+            
+            ax_meta.axis('off')
+            ax_meta.text(0.5, 0.95, clean_latex(n_meta), transform=ax_meta.transAxes, fontsize=14, linespacing=1.8, ha='center', va='top', bbox=dict(boxstyle="round,pad=0.8", fc="ivory", alpha=0.95, ec="darkgrey", lw=1.0))
+            ax_meta.set_title(clean_latex(r"\textbf{Physical and Morphological properties}"), fontsize=16, fontweight='bold', color='navy', pad=15)
+            
+            if n_rgb is not None:
+                ax_img.imshow(n_rgb, origin='lower')
+            else:
+                ax_img.text(0.5, 0.5, "EuclidImage missing", ha='center', va='center')
+            ax_img.axis('off')
+            
+            ax_stats.axis('off')
+            ax_stats.text(0.5, 0.95, clean_latex(n_spec_meta), transform=ax_stats.transAxes, fontsize=14, linespacing=1.6, ha='center', va='top', bbox=dict(boxstyle="round,pad=0.8", fc="aliceblue", alpha=0.95, ec="steelblue", lw=1.0))
+            ax_stats.set_title(clean_latex(r"\textbf{Spectroscopic properties}"), fontsize=16, fontweight='bold', color='steelblue', pad=15)
+            
+            plot_spectrum_into_axes(ax_spec_blue, ax_spec_red, n_rec, tid, n_z)
+            ax_spec_blue.set_title(clean_latex(rf"\textbf{{Spectrum (Blue Channel)}}"), fontsize=11, fontweight='bold')
+            
+            plt.suptitle(clean_latex(rf"\textbf{{Euclid Morphological Rank \#{idx+1} ({sim*100:.2f}\%): ID: {tid}}}"), fontsize=22, fontweight='bold', y=0.98)
+            pdf.savefig()
+            plt.close()
+            
+    row_dict = {"query_fits": fits_file.name}
+    for idx, (tid, sim) in enumerate(zip(top_ids, top_sims)):
+        row_dict[f"neighbor_{idx+1}_id"] = tid
+        row_dict[f"neighbor_{idx+1}_similarity"] = sim
+    return row_dict
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +656,82 @@ def main():
         
     ids = np.load(embeddings_dir / "ids.npy").astype(np.int64)
     
+    # If FITS mode is requested
+    if args.query_fits is not None:
+        logger.info("\nInitializing active AstroPT Datasets and Model via checkpoint for FITS mode...")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model, config, registry, raw_config_dict = load_local_model(Path(args.ckpt_path), device)
+        
+        raw_config_dict['data_dir'] = args.data_dir
+        raw_config_dict['batch_size'] = args.batch_size
+        
+        valid_keys = {f.name for f in fields(TrainingConfig)}
+        clean_config_dict = {k: v for k, v in raw_config_dict.items() if k in valid_keys}
+        training_config = TrainingConfig(**clean_config_dict)
+        
+        train_loader, val_loader, _ = create_dataloaders(training_config, ddp=False)
+        ds = CombinedDatasetWrapper(train_loader.dataset, val_loader.dataset)
+        ds_ids = np.array(ds.ds['targetid'])
+        
+        # Read FITS metadata catalog
+        logger.info(f"Reading FITS metadata catalog from {args.metadata_path}...")
+        fits_table = Table.read(args.metadata_path)
+        fits_df = fits_table.to_pandas()
+        
+        # Decode string bytes
+        for col in fits_df.columns:
+            if fits_df[col].dtype == object and isinstance(fits_df[col].iloc[0], bytes):
+                try: fits_df[col] = fits_df[col].str.decode('utf-8')
+                except: pass
+                
+        target_id_col = 'TARGETID' if 'TARGETID' in fits_df.columns else 'targetid'
+        fits_indexed = fits_df.drop_duplicates(subset=[target_id_col]).set_index(target_id_col)
+        
+        # Load image embeddings only since custom fits files only have images
+        fallbacks = ["EuclidImage_pooled", "EuclidImage_phase2", "EuclidImage_phase1", "EuclidImage", "images"]
+        found_file = None
+        for fallback in fallbacks:
+            if fallback in emb_files:
+                found_file = emb_files[fallback]
+                break
+        if found_file is None:
+            raise FileNotFoundError(f"Could not find EuclidImage embedding file in {embeddings_dir}")
+            
+        logger.info(f"Loading 'EuclidImage' space from: {found_file.name}")
+        X = np.load(found_file)
+        if X.ndim == 3:
+            X = X.mean(axis=1)
+            
+        # L2 normalize X for similarity calculations
+        norm_X = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-8)
+        
+        query_path = Path(args.query_fits)
+        if query_path.is_dir():
+            fits_files = sorted(list(query_path.glob("**/*.fits")))
+        else:
+            fits_files = [query_path]
+            
+        if not fits_files:
+            logger.error(f"No FITS files found at path {args.query_fits}")
+            sys.exit(1)
+            
+        logger.info(f"Found {len(fits_files)} FITS files to query.")
+        
+        results_list = []
+        from tqdm import tqdm
+        for fits_file in tqdm(fits_files, desc="Processing FITS queries"):
+            row_dict = extract_and_search_fits(fits_file, model, device, norm_X, ids, ds, ds_ids, fits_indexed, save_dir, args)
+            if row_dict:
+                results_list.append(row_dict)
+                
+        # Write CSV if requested
+        if args.output_csv:
+            csv_path = Path(args.output_csv)
+            pd.DataFrame(results_list).to_csv(csv_path, index=False)
+            logger.info(f"Saved similarity search results to: {csv_path}")
+            
+        sys.exit(0)
+        
     # Find query index
     query_id = args.query_id
     matches = np.where(ids == query_id)[0]
@@ -248,11 +745,25 @@ def main():
     
     # Compute similarity for Image, Spectrum, and Joint spaces
     spaces = {}
-    for space_name in ["EuclidImage", "DESISpectrum", "joint"]:
-        if space_name not in emb_files:
-            logger.warning(f"Embedding space '{space_name}.npy' not found! Skipping similarity computation for it.")
+    filename_mappings = {
+        "EuclidImage": ["EuclidImage_pooled", "EuclidImage_phase2", "EuclidImage_phase1", "EuclidImage", "images"],
+        "DESISpectrum": ["DESISpectrum_pooled", "DESISpectrum_phase2", "DESISpectrum_phase1", "DESISpectrum", "spectra"],
+        "joint": ["joint_mean", "joint_concat", "joint"]
+    }
+    
+    for space_name, fallbacks in filename_mappings.items():
+        found_file = None
+        for fallback in fallbacks:
+            if fallback in emb_files:
+                found_file = emb_files[fallback]
+                break
+                
+        if found_file is None:
+            logger.warning(f"Embedding space file for '{space_name}' not found (tried: {fallbacks})! Skipping similarity computation for it.")
             continue
-        X = np.load(embeddings_dir / f"{space_name}.npy")
+            
+        logger.info(f"Loading '{space_name}' space from: {found_file.name}")
+        X = np.load(found_file)
         if X.ndim == 3:
             X = X.mean(axis=1) # Mean pooling sequence tokens
             
@@ -275,8 +786,8 @@ def main():
     clean_config_dict = {k: v for k, v in raw_config_dict.items() if k in valid_keys}
     training_config = TrainingConfig(**clean_config_dict)
     
-    _, loader, _ = create_dataloaders(training_config, ddp=False)
-    ds = loader.dataset
+    train_loader, val_loader, _ = create_dataloaders(training_config, ddp=False)
+    ds = CombinedDatasetWrapper(train_loader.dataset, val_loader.dataset)
     
     # Read FITS metadata catalog
     logger.info(f"Reading FITS metadata catalog from {args.metadata_path}...")
@@ -458,7 +969,7 @@ def main():
         # Meta
         ax_meta.axis('off')
         ax_meta.text(
-            0.5, 0.95, query_meta, 
+            0.5, 0.95, clean_latex(query_meta), 
             transform=ax_meta.transAxes, 
             fontsize=14,
             linespacing=1.8,
@@ -466,7 +977,7 @@ def main():
             verticalalignment='top',
             bbox=dict(boxstyle="round,pad=0.8", fc="ivory", alpha=0.95, ec="darkgrey", lw=1.0)
         )
-        ax_meta.set_title(r"\textbf{Physical and Morphological properties}", fontsize=16, fontweight='bold', color='navy', pad=15)
+        ax_meta.set_title(clean_latex(r"\textbf{Physical and Morphological properties}"), fontsize=16, fontweight='bold', color='navy', pad=15)
         
         # Image
         if query_rgb is not None:
@@ -479,7 +990,7 @@ def main():
         # Stats info box (Spectroscopic properties)
         ax_stats.axis('off')
         ax_stats.text(
-            0.5, 0.95, query_spec_meta, 
+            0.5, 0.95, clean_latex(query_spec_meta), 
             transform=ax_stats.transAxes, 
             fontsize=14,
             linespacing=1.6,
@@ -487,13 +998,13 @@ def main():
             verticalalignment='top',
             bbox=dict(boxstyle="round,pad=0.8", fc="aliceblue", alpha=0.95, ec="steelblue", lw=1.0)
         )
-        ax_stats.set_title(r"\textbf{Spectroscopic properties}", fontsize=16, fontweight='bold', color='steelblue', pad=15)
+        ax_stats.set_title(clean_latex(r"\textbf{Spectroscopic properties}"), fontsize=16, fontweight='bold', color='steelblue', pad=15)
         
         # Spectrum
         plot_spectrum_into_axes(ax_spec_blue, ax_spec_red, query_record, query_id, query_z)
-        ax_spec_blue.set_title(rf"\textbf{{Query Spectrum (Blue Channel)}}", fontsize=11, fontweight='bold')
+        ax_spec_blue.set_title(clean_latex(rf"\textbf{{Query Spectrum (Blue Channel)}}"), fontsize=11, fontweight='bold')
         
-        plt.suptitle(rf"\textbf{{AstroPT similarity search: ID: {query_id}}}", fontsize=22, fontweight='bold', y=0.98)
+        plt.suptitle(clean_latex(rf"\textbf{{AstroPT similarity search: ID: {query_id}}}"), fontsize=22, fontweight='bold', y=0.98)
         pdf.savefig()
         plt.close()
         
@@ -532,7 +1043,7 @@ def main():
                 # Title is completely removed per user request
                 ax_n.axis('off')
                 
-            plt.suptitle(r"\textbf{Euclid Morphological Neighbors}", fontsize=22, fontweight='bold', y=0.98)
+            plt.suptitle(clean_latex(r"\textbf{Euclid Morphological Neighbors}"), fontsize=22, fontweight='bold', y=0.98)
             pdf.savefig()
             plt.close()
             
@@ -565,7 +1076,7 @@ def main():
                 # Meta box
                 ax_meta.axis('off')
                 ax_meta.text(
-                    0.5, 0.95, n_meta, 
+                    0.5, 0.95, clean_latex(n_meta), 
                     transform=ax_meta.transAxes, 
                     fontsize=14,
                     linespacing=1.8,
@@ -573,7 +1084,7 @@ def main():
                     verticalalignment='top',
                     bbox=dict(boxstyle="round,pad=0.8", fc="ivory", alpha=0.95, ec="darkgrey", lw=1.0)
                 )
-                ax_meta.set_title(r"\textbf{Physical and Morphological properties}", fontsize=16, fontweight='bold', color='navy', pad=15)
+                ax_meta.set_title(clean_latex(r"\textbf{Physical and Morphological properties}"), fontsize=16, fontweight='bold', color='navy', pad=15)
                 
                 # Image
                 if n_rgb is not None:
@@ -586,7 +1097,7 @@ def main():
                 # Stats box (Spectroscopic properties)
                 ax_stats.axis('off')
                 ax_stats.text(
-                    0.5, 0.95, n_spec_meta, 
+                    0.5, 0.95, clean_latex(n_spec_meta), 
                     transform=ax_stats.transAxes, 
                     fontsize=14,
                     linespacing=1.6,
@@ -594,14 +1105,14 @@ def main():
                     verticalalignment='top',
                     bbox=dict(boxstyle="round,pad=0.8", fc="aliceblue", alpha=0.95, ec="steelblue", lw=1.0)
                 )
-                ax_stats.set_title(r"\textbf{Spectroscopic properties}", fontsize=16, fontweight='bold', color='steelblue', pad=15)
+                ax_stats.set_title(clean_latex(r"\textbf{Spectroscopic properties}"), fontsize=16, fontweight='bold', color='steelblue', pad=15)
                 
                 # Spectrum
                 plot_spectrum_into_axes(ax_spec_blue, ax_spec_red, n_rec, tid, n_z)
-                ax_spec_blue.set_title(rf"\textbf{{Spectrum (Blue Channel)}}", fontsize=11, fontweight='bold')
+                ax_spec_blue.set_title(clean_latex(rf"\textbf{{Spectrum (Blue Channel)}}"), fontsize=11, fontweight='bold')
                 
                 # Page super title
-                plt.suptitle(rf"\textbf{{Euclid Morphological Rank \#{idx+1} ({sim*100:.2f}\%): ID: {tid}}}", fontsize=22, fontweight='bold', y=0.98)
+                plt.suptitle(clean_latex(rf"\textbf{{Euclid Morphological Rank \#{idx+1} ({sim*100:.2f}\%): ID: {tid}}}"), fontsize=22, fontweight='bold', y=0.98)
                 pdf.savefig()
                 plt.close()
                 
@@ -620,7 +1131,7 @@ def main():
                 wave_ang = np.array(query_record['spectrum_wave']).flatten()
                 ax_q.plot(wave_ang, spec_gt, 'r-', lw=1, alpha=0.8)
                 ax_q.set_xlim(wave_ang.min(), wave_ang.max())
-                ax_q.set_title(rf"\textbf{{Query (ID: {query_id})}}", fontsize=11, fontweight='bold')
+                ax_q.set_title(clean_latex(rf"\textbf{{Query (ID: {query_id})}}"), fontsize=11, fontweight='bold')
                 if query_z is not None:
                     for name, rest_wave in MAIN_LINES.items():
                         obs_wave = rest_wave * (1 + query_z)
@@ -648,7 +1159,7 @@ def main():
                     wave_ang = np.array(n_rec['spectrum_wave']).flatten()
                     ax_n.plot(wave_ang, spec_gt, 'k-', lw=1, alpha=0.8)
                     ax_n.set_xlim(wave_ang.min(), wave_ang.max())
-                    ax_n.set_title(rf"\textbf{{Rank \#{idx+1} ({sim*100:.2f}\%) | ID: {tid}}}", fontsize=11, fontweight='bold')
+                    ax_n.set_title(clean_latex(rf"\textbf{{Rank \#{idx+1} ({sim*100:.2f}\%) | ID: {tid}}}"), fontsize=11, fontweight='bold')
                     if n_z is not None and not pd.isna(n_z):
                         for name, rest_wave in MAIN_LINES.items():
                             obs_wave = rest_wave * (1 + n_z)
@@ -659,9 +1170,9 @@ def main():
                 
                 ax_n.set_ylabel(r"Flux", fontsize=9)
             
-            axes[-1].set_xlabel(r"Observed Wavelength [\AA]", fontsize=12, fontweight='bold')
+            axes[-1].set_xlabel(clean_latex(r"Observed Wavelength [\AA]"), fontsize=12, fontweight='bold')
             
-            plt.suptitle(r"\textbf{DESI Spectroscopic Neighbors}", fontsize=22, fontweight='bold', y=0.98)
+            plt.suptitle(clean_latex(r"\textbf{DESI Spectroscopic Neighbors}"), fontsize=22, fontweight='bold', y=0.98)
             pdf.savefig()
             plt.close()
             
@@ -694,7 +1205,7 @@ def main():
                 # Meta box
                 ax_meta.axis('off')
                 ax_meta.text(
-                    0.5, 0.95, n_meta, 
+                    0.5, 0.95, clean_latex(n_meta), 
                     transform=ax_meta.transAxes, 
                     fontsize=14,
                     linespacing=1.8,
@@ -702,7 +1213,7 @@ def main():
                     verticalalignment='top',
                     bbox=dict(boxstyle="round,pad=0.8", fc="ivory", alpha=0.95, ec="darkgrey", lw=1.0)
                 )
-                ax_meta.set_title(r"\textbf{Physical and Morphological properties}", fontsize=16, fontweight='bold', color='navy', pad=15)
+                ax_meta.set_title(clean_latex(r"\textbf{Physical and Morphological properties}"), fontsize=16, fontweight='bold', color='navy', pad=15)
                 
                 # Image
                 if n_rgb is not None:
@@ -714,7 +1225,7 @@ def main():
                 # Stats box (Spectroscopic properties)
                 ax_stats.axis('off')
                 ax_stats.text(
-                    0.5, 0.95, n_spec_meta, 
+                    0.5, 0.95, clean_latex(n_spec_meta), 
                     transform=ax_stats.transAxes, 
                     fontsize=14,
                     linespacing=1.6,
@@ -722,14 +1233,14 @@ def main():
                     verticalalignment='top',
                     bbox=dict(boxstyle="round,pad=0.8", fc="aliceblue", alpha=0.95, ec="steelblue", lw=1.0)
                 )
-                ax_stats.set_title(r"\textbf{Spectroscopic properties}", fontsize=16, fontweight='bold', color='steelblue', pad=15)
+                ax_stats.set_title(clean_latex(r"\textbf{Spectroscopic properties}"), fontsize=16, fontweight='bold', color='steelblue', pad=15)
                 
                 # Spectrum
                 plot_spectrum_into_axes(ax_spec_blue, ax_spec_red, n_rec, tid, n_z)
-                ax_spec_blue.set_title(rf"\textbf{{Spectrum (Blue Channel)}}", fontsize=11, fontweight='bold')
+                ax_spec_blue.set_title(clean_latex(rf"\textbf{{Spectrum (Blue Channel)}}"), fontsize=11, fontweight='bold')
                 
                 # Page super title
-                plt.suptitle(rf"\textbf{{DESI Spectroscopic Rank \#{idx+1} ({sim*100:.2f}\%): ID: {tid}}}", fontsize=22, fontweight='bold', y=0.98)
+                plt.suptitle(clean_latex(rf"\textbf{{DESI Spectroscopic Rank \#{idx+1} ({sim*100:.2f}\%): ID: {tid}}}"), fontsize=22, fontweight='bold', y=0.98)
                 pdf.savefig()
                 plt.close()
                 
@@ -763,7 +1274,7 @@ def main():
                 # Meta box
                 ax_meta.axis('off')
                 ax_meta.text(
-                    0.5, 0.95, n_meta, 
+                    0.5, 0.95, clean_latex(n_meta), 
                     transform=ax_meta.transAxes, 
                     fontsize=14,
                     linespacing=1.8,
@@ -771,7 +1282,7 @@ def main():
                     verticalalignment='top',
                     bbox=dict(boxstyle="round,pad=0.8", fc="ivory", alpha=0.95, ec="darkgrey", lw=1.0)
                 )
-                ax_meta.set_title(r"\textbf{Physical and Morphological properties}", fontsize=16, fontweight='bold', color='navy', pad=15)
+                ax_meta.set_title(clean_latex(r"\textbf{Physical and Morphological properties}"), fontsize=16, fontweight='bold', color='navy', pad=15)
                 
                 # Image
                 if n_rgb is not None:
@@ -783,7 +1294,7 @@ def main():
                 # Stats box (Spectroscopic properties)
                 ax_stats.axis('off')
                 ax_stats.text(
-                    0.5, 0.95, n_spec_meta, 
+                    0.5, 0.95, clean_latex(n_spec_meta), 
                     transform=ax_stats.transAxes, 
                     fontsize=14,
                     linespacing=1.6,
@@ -791,16 +1302,17 @@ def main():
                     verticalalignment='top',
                     bbox=dict(boxstyle="round,pad=0.8", fc="aliceblue", alpha=0.95, ec="steelblue", lw=1.0)
                 )
-                ax_stats.set_title(r"\textbf{Spectroscopic properties}", fontsize=16, fontweight='bold', color='steelblue', pad=15)
+                ax_stats.set_title(clean_latex(r"\textbf{Spectroscopic properties}"), fontsize=16, fontweight='bold', color='steelblue', pad=15)
                 
                 # Spectrum
                 plot_spectrum_into_axes(ax_spec_blue, ax_spec_red, n_rec, tid, n_z)
-                ax_spec_blue.set_title(rf"\textbf{{Spectrum (Blue Channel)}}", fontsize=11, fontweight='bold')
+                ax_spec_blue.set_title(clean_latex(rf"\textbf{{Spectrum (Blue Channel)}}"), fontsize=11, fontweight='bold')
                 
                 # Page super title
-                plt.suptitle(rf"\textbf{{Joint Rank \#{idx+1} ({sim*100:.2f}\%): ID: {tid}}}", fontsize=22, fontweight='bold', y=0.98)
+                plt.suptitle(clean_latex(rf"\textbf{{Joint Rank \#{idx+1} ({sim*100:.2f}\%): ID: {tid}}}"), fontsize=22, fontweight='bold', y=0.98)
                 pdf.savefig()
                 plt.close()
+
                 
     logger.info(f"Done. Multimodal similarity search complete. Saved dashboard PDF to {pdf_path}")
 

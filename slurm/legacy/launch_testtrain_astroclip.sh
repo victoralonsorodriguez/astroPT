@@ -41,7 +41,7 @@ while getopts "n:d:a:s:b:w:m:th" opt; do
 done
 
 cd "$REPO_ROOT" || { echo "[ERROR] Cannot enter REPO_ROOT: $REPO_ROOT"; exit 1; }
-source "/.venv/bin/activate"
+source "$REPO_ROOT/.venv/bin/activate"
 
 echo "Running AstroCLIP dependency test: $T_NAME"
 echo "  DATA_DIR:     $DATA_DIR"
@@ -100,20 +100,22 @@ if [[ ! -f "$ASTRODINO_CKPT" || ! -f "$SPECFORMER_CKPT" ]]; then
     echo "       To run training, download from README links:"
     echo "       https://huggingface.co/polymathic-ai/astrodino"
     echo "       https://huggingface.co/polymathic-ai/specformer"
-
+fi
 if [[ "$RUN_TRAIN" -ne 1 ]]; then
     echo "[OK] Dependency preflight finished (no training requested)."
     exit 0
+fi
 
 if [[ ! -f "$ASTRODINO_CKPT" || ! -f "$SPECFORMER_CKPT" ]]; then
     echo "[FATAL] Tiny training requested (-t) but pretrained checkpoints are missing."
     exit 2
+fi
 
 RUN_TAG=$(date +%Y%m%d_%H%M%S)
 TRAIN_DIR="$REPO_ROOT/logs/astroclip_depcheck_${RUN_TAG}"
 
 echo "[Run] Starting tiny AstroCLIP train in: $TRAIN_DIR"
-python scripts/train_astroclip_arrow.py \
+python scripts/legacy/train_astroclip_arrow.py \
     --data_dir "$DATA_DIR" \
     --train_dir "$TRAIN_DIR" \
     --train_name "$T_NAME" \

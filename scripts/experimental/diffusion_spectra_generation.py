@@ -66,8 +66,9 @@ def find_arrow_record(data_dir: Path, target_id: int) -> Optional[dict]:
 # Plotting Global LaTeX Configuration (matching dash_internal_reconstruction_samples.py)
 plt.rcParams['text.latex.preamble'] = r'''
             \usepackage{siunitx}
-            \usepackage{bm}
             \usepackage{amsmath} 
+            \usepackage{times}
+            \usepackage{bm}
             \sisetup{
             detect-family,
             separate-uncertainty=true,
@@ -78,7 +79,7 @@ plt.rcParams['text.latex.preamble'] = r'''
             \DeclareSIUnit{\cts}{cts}
             '''
 plt.rc('text', usetex=True)
-plt.rc('font', family='serif', weight='bold') 
+plt.rc('font', family='serif') 
 
 plt.rcParams.update({
     'axes.grid': True,
@@ -103,22 +104,42 @@ MAIN_LINES = [
 
 def plot_spectral_lines(ax, start_wl, end_wl, z):
     """Annotates key spectral lines on the panel if their redshifted wavelength falls in the wavelength range."""
-    y_min, y_max = ax.get_ylim()
-    y_range = y_max - y_min
-    pos_high = y_max - (y_range * 0.15) # 15% from the top
-    pos_low  = y_min + (y_range * 0.15) # 15% from the bottom
-    
-    sorted_lines = sorted(MAIN_LINES, key=lambda x: x[1])
-    counter = 0
-    
-    for name, rest_wave in sorted_lines:
+    if z is None:
+        return
+
+    trans = ax.get_xaxis_transform()
+
+    lines_in_range = []
+    for name, rest_wave in sorted(MAIN_LINES, key=lambda x: x[1]):
         obs_wave = rest_wave * (1 + z)
         if start_wl <= obs_wave < end_wl:
-            y_pos = pos_high if counter % 2 == 0 else pos_low
-            ax.axvline(obs_wave, color='royalblue', linestyle='--', alpha=0.45, lw=0.95)
-            ax.text(obs_wave, y_pos, rf"\textbf{{{name}}}", rotation=90, 
-                    color='royalblue', va='bottom', ha='right', fontsize=8, alpha=0.8)
-            counter += 1
+            lines_in_range.append((name, obs_wave))
+
+    if not lines_in_range:
+        return
+
+    wl_span = end_wl - start_wl
+    MIN_DX = 0.022 * wl_span
+
+    text_x = [wave for name, wave in lines_in_range]
+    for _ in range(50):
+        for i in range(len(text_x) - 1):
+            dist = text_x[i+1] - text_x[i]
+            if dist < MIN_DX:
+                overlap = MIN_DX - dist
+                text_x[i] -= overlap / 2.0
+                text_x[i+1] += overlap / 2.0
+
+    for i, (name, obs_wave) in enumerate(lines_in_range):
+        ax.axvline(obs_wave, color='crimson', linestyle='--', alpha=1.0, lw=1.2)
+
+        t_x = text_x[i]
+        ax.plot([obs_wave, t_x], [1.0, 1.02], transform=trans,
+                color='crimson', lw=1.0, alpha=0.6, clip_on=False)
+
+        ax.text(t_x, 1.03, rf"\textbf{{{name}}}",
+                transform=trans, rotation=60, va='bottom', ha='left',
+                fontsize=16, color='crimson', fontweight='bold', clip_on=False)
 
 # Define AdaptiveMLP structure to match probing_downstream_benchmark
 class AdaptiveMLP(torch.nn.Module):
@@ -138,59 +159,93 @@ class AdaptiveMLP(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
-def get_morphological_meta_str(tid: int, metadata) -> str:
+def get_morphological_meta_str(tid: int, metadata, query_record: dict = None, pred_z: float = None) -> str:
     import pandas as pd
     if metadata is not None and tid in metadata.index:
         meta = metadata.loc[tid]
         
+        def _safe(key):
+            v = meta.get(key, None)
+            return None if (v is None or (isinstance(v, float) and pd.isna(v))) else v
+            
+        euclid_id = None
+        if query_record is not None:
+            euclid_id = query_record.get('euclid_id', None)
+            if hasattr(euclid_id, 'item'):
+                euclid_id = euclid_id.item()
+                
+        if euclid_id is None:
+            euclid_id = _safe('EUCLID_ID')
+        if euclid_id is None:
+            euclid_id = _safe('euclid_id')
+
+        euclid_id_str = f"{euclid_id}".replace("_", "\\_") if euclid_id is not None else "N/A"
+        
         # Coordinates
-        ra_val = meta.get('RA', None)
-        dec_val = meta.get('DEC', None)
-        coords_str = f"${ra_val:.6f}^\\circ, {dec_val:.6f}^\\circ$" if (ra_val is not None and not pd.isna(ra_val)) else "N/A"
+        ra_val = _safe('RA')
+        dec_val = _safe('DEC')
+        coords_str = f"${ra_val:.6f}^\\circ, {dec_val:.6f}^\\circ$" if (ra_val is not None) else "N/A"
         
         # Redshift
-        z_val = meta.get('Z', None)
-        z_str = f"{z_val:.4f}" if (z_val is not None and not pd.isna(z_val)) else "N/A"
+        z_val = _safe('Z')
+        if z_val is not None:
+            if pred_z is not None:
+                z_str = f"{z_val:.4f} (Pred: {pred_z:.4f})"
+            else:
+                z_str = f"{z_val:.4f}"
+        else:
+            if pred_z is not None:
+                z_str = f"N/A (Pred: {pred_z:.4f})"
+            else:
+                z_str = "N/A"
         
         # Stellar Mass
-        logmstar_val = meta.get('LOGMSTAR', None)
-        mstar = f"$10^{{{logmstar_val:.2f}}} \\text{{ M}}_\\odot$" if (logmstar_val is not None and not pd.isna(logmstar_val)) else "N/A"
+        logmstar_val = _safe('LOGMSTAR')
+        mstar = f"$10^{{{logmstar_val:.2f}}} \\text{{ M}}_\\odot$" if (logmstar_val is not None) else "N/A"
         
         # Star Formation Rate
-        logsfr_val = meta.get('LOGSFR', None)
-        sfr = f"${10**logsfr_val:.3f} \\text{{ M}}_\\odot/\\text{{yr}}$" if (logsfr_val is not None and not pd.isna(logsfr_val)) else "N/A"
+        logsfr_val = _safe('LOGSFR')
+        sfr = f"${10**logsfr_val:.3f} \\text{{ M}}_\\odot/\\text{{yr}}$" if (logsfr_val is not None) else "N/A"
         
         # Spectype
-        spectype = str(meta.get('SPECTYPE', 'N/A'))
+        spectype_val = _safe('SPECTYPE')
+        if isinstance(spectype_val, bytes):
+            spectype = spectype_val.decode('utf-8').strip()
+        elif spectype_val is not None:
+            spectype = str(spectype_val).strip()
+        else:
+            spectype = "N/A"
         
         # Euclid Sersic Index
-        sersic_n_val = meta.get('sersic_sersic_vis_index', None)
-        n_str = f"{sersic_n_val:.2f}" if (sersic_n_val is not None and not pd.isna(sersic_n_val)) else "N/A"
+        sersic_n_val = _safe('sersic_sersic_vis_index')
+        n_str = f"{sersic_n_val:.2f}" if (sersic_n_val is not None) else "N/A"
         
         # Euclid Effective Radius
-        sersic_re_val = meta.get('sersic_sersic_vis_radius', None)
-        re_str = f"{sersic_re_val:.3f}''" if (sersic_re_val is not None and not pd.isna(sersic_re_val)) else "N/A"
+        sersic_re_val = _safe('sersic_sersic_vis_radius')
+        re_str = f"{sersic_re_val:.3f}''" if (sersic_re_val is not None) else "N/A"
         
         # Axis Ratio
-        ba_val = meta.get('sersic_sersic_vis_axis_ratio', None)
-        ba_str = f"{ba_val:.3f}" if (ba_val is not None and not pd.isna(ba_val)) else "N/A"
+        ba_val = _safe('sersic_sersic_vis_axis_ratio')
+        ba_str = f"{ba_val:.3f}" if (ba_val is not None) else "N/A"
         
         # VIS Aperture Flux
-        vis_flux_val = meta.get('flux_vis_1fwhm_aper', None)
-        vis_flux_str = f"{vis_flux_val:.2f}" if (vis_flux_val is not None and not pd.isna(vis_flux_val)) else "N/A"
+        vis_flux_val = _safe('flux_vis_1fwhm_aper')
+        vis_flux_str = f"{vis_flux_val:.2f}" if (vis_flux_val is not None) else "N/A"
         
         meta_str = (
+            f"\\textbf{{DESI TARGETID}}: {tid}\n"
+            f"\\textbf{{Euclid ID}}: {euclid_id_str}\n"
             f"\\textbf{{Coords}}: {coords_str}\n"
-            f"\\textbf{{Z}}: {z_str}\n"
-            f"\\textbf{{$M_*$}}: {mstar}\n"
-            f"\\textbf{{SFR}}: {sfr}\n"
+            f"$\\bm{{z}}$: ${z_str}$\n"
+            f"$\\bm{{M_{{*}}}}$: {mstar}\n"
+            f"$\\bm{{\\mathrm{{SFR}}}}$: {sfr}\n"
             f"\\textbf{{Spectype}}: {spectype}\n"
-            f"\\textbf{{VIS Flux}}: {vis_flux_str}\n"
-            f"\\textbf{{Sersic n}}: {n_str}\n"
-            f"\\textbf{{Radius $R_{{eff}}$}}: {re_str}\n"
-            f"\\textbf{{Axis Ratio}}: {ba_str}"
+            f"$\\bm{{F(\\mathrm{{VIS}})}}$: {f'${vis_flux_val:.2f}$' if vis_flux_val is not None else 'N/A'}\n"
+            f"$\\bm{{n_{{\\mathrm{{Sersic}}}}}}$: {f'${sersic_n_val:.2f}$' if sersic_n_val is not None else 'N/A'}\n"
+            f"$\\bm{{R_{{\\mathrm{{eff}}}}}}$: {f'${sersic_re_val:.3f}$' if sersic_re_val is not None else 'N/A'}\n"
+            f"$\\bm{{b/a}}$: {f'${ba_val:.3f}$' if ba_val is not None else 'N/A'}"
         )
-        return meta_str.replace("_", "\\_")
+        return meta_str
     return f"\\textbf{{ID}}: {tid}\n(No metadata)"
 
 def get_spectroscopic_meta_str(tid: int, metadata) -> str:
@@ -207,29 +262,21 @@ def get_spectroscopic_meta_str(tid: int, metadata) -> str:
         hb_ew = meta.get('HBETA_EW', None)
         oii_ew = meta.get('OII_3726_EW', None)
         
-        ha_sig = meta.get('HALPHA_SIGMA', None)
-        snr_r = meta.get('SNR_SPEC_R', None)
-        snr_z = meta.get('SNR_SPEC_Z', None)
-        
         def fmt_flux(v): return f"{v:.2f}" if (v is not None and not pd.isna(v)) else "N/A"
-        def fmt_ew(v): return f"{v:.2f} \\AA" if (v is not None and not pd.isna(v)) else "N/A"
-        def fmt_val(v, unit=""): return f"{v:.1f}{unit}" if (v is not None and not pd.isna(v)) else "N/A"
+        def fmt_ew(v): return rf"{v:.2f} \text{{\AA}}" if (v is not None and not pd.isna(v)) else "N/A"
         
         stats_text = (
             f"\\textbf{{Spectral Line Fluxes}}:\n"
-            f"  - H$\\alpha$ Flux: {fmt_flux(ha_f)}\n"
-            f"  - H$\\beta$ Flux: {fmt_flux(hb_f)}\n"
-            f"  - [O III] 5007 Flux: {fmt_flux(oiii_f)}\n"
-            f"  - [O II] 3726 Flux: {fmt_flux(oii_f)}\n\n"
+            f"  - $\\bm{{F(\\mathrm{{H}}\\alpha)}}$: ${fmt_flux(ha_f)}$\n"
+            f"  - $\\bm{{F(\\mathrm{{H}}\\beta)}}$: ${fmt_flux(hb_f)}$\n"
+            f"  - $\\bm{{F([\\mathrm{{O\\,III}}]\\,\\lambda 5007)}}$: ${fmt_flux(oiii_f)}$\n"
+            f"  - $\\bm{{F([\\mathrm{{O\\,II}}]\\,\\lambda 3726)}}$: ${fmt_flux(oii_f)}$\n\n"
             f"\\textbf{{Equivalent Widths}}:\n"
-            f"  - H$\\alpha$ EW: {fmt_ew(ha_ew)}\n"
-            f"  - H$\\beta$ EW: {fmt_ew(hb_ew)}\n"
-            f"  - [O II] 3726 EW: {fmt_ew(oii_ew)}\n\n"
-            f"\\textbf{{Spectra Quality}}:\n"
-            f"  - H$\\alpha$ Width $\\sigma$: {fmt_val(ha_sig, ' km/s')}\n"
-            f"  - SNR Spec R: {fmt_val(snr_r)} | SNR Spec Z: {fmt_val(snr_z)}"
+            f"  - $\\bm{{\\mathrm{{EW}}(\\mathrm{{H}}\\alpha)}}$: ${fmt_ew(ha_ew)}$\n"
+            f"  - $\\bm{{\\mathrm{{EW}}(\\mathrm{{H}}\\beta)}}$: ${fmt_ew(hb_ew)}$\n"
+            f"  - $\\bm{{\\mathrm{{EW}}([\\mathrm{{O\\,II}}]\\,\\lambda 3726)}}$: ${fmt_ew(oii_ew)}$"
         )
-        return stats_text.replace("_", "\\_")
+        return stats_text
     return "\\textbf{Spectra data missing}"
 
 def parse_args():
@@ -251,6 +298,7 @@ def parse_args():
     parser.add_argument("--guidance_scale", type=float, default=1.5, help="Classifier-Free Guidance scale. 0.0 means no guidance. (default: 1.5)")
     parser.add_argument("--embeddings_key", type=str, default=None, help="Key in NPZ file to use for embeddings (e.g. EuclidImage_phase2)")
     parser.add_argument("--metadata_path", type=str, default=None, help="Path to FITS metadata catalog for physical properties display")
+    parser.add_argument("--use_knn_spec", action="store_true", help="Estimate missing spectrum embedding using KNN neighbors in image space, allowing Joint/Spectrum probers to be evaluated")
     return parser.parse_args()
 
 def load_redshift_prober(weights_path: Path, target_key: str, device: torch.device) -> tuple:
@@ -364,11 +412,13 @@ def main():
     
     emb_key = None
     if getattr(args, "embeddings_key", None) is not None:
-        emb_key = args.embeddings_key
-        if emb_key not in emb_data:
-            raise KeyError(f"Requested embeddings key '{emb_key}' not found in NPZ. Available keys: {list(emb_data.keys())}")
-    else:
-        for key in ['images', 'EuclidImage', 'best_img-mean']:
+        if args.embeddings_key in emb_data:
+            emb_key = args.embeddings_key
+        else:
+            print(f"[WARNING] Requested embeddings key '{args.embeddings_key}' not found in NPZ. Searching for fallback keys...")
+            
+    if emb_key is None:
+        for key in ['EuclidImage_phase2', 'EuclidImage_pooled', 'EuclidImage', 'images', 'best_img-mean']:
             if key in emb_data:
                 emb_key = key
                 break
@@ -393,6 +443,36 @@ def main():
     galaxy_id = ids[idx]
     image_embedding = embeddings[idx]
     
+    # Estimate missing spectral embedding using KNN if requested
+    estimated_spec_emb = None
+    estimated_joint_mean = None
+    estimated_joint_concat = None
+    
+    if args.use_knn_spec:
+        print("[INFO] Estimating missing spectrum embedding using KNN (K=10)...")
+        spec_key = None
+        for key in ['DESISpectrum_pooled', 'DESISpectrum', 'spectra', 'best_spec-rank']:
+            if key in emb_data:
+                spec_key = key
+                break
+        if spec_key is not None:
+            ref_image_embeddings = embeddings
+            query_norm = image_embedding / np.linalg.norm(image_embedding).clip(min=1e-10)
+            ref_norms = ref_image_embeddings / np.linalg.norm(ref_image_embeddings, axis=1, keepdims=True).clip(min=1e-10)
+            
+            similarities = np.dot(ref_norms, query_norm)
+            similarities[idx] = -np.inf  # Exclude self
+            
+            nearest_indices = np.argsort(similarities)[-10:][::-1]
+            neighbor_spec_embs = emb_data[spec_key][nearest_indices]
+            estimated_spec_emb = np.mean(neighbor_spec_embs, axis=0)
+            
+            estimated_joint_mean = 0.5 * (image_embedding + estimated_spec_emb)
+            estimated_joint_concat = np.concatenate([image_embedding, estimated_spec_emb])
+            print(f"[SUCCESS] Estimated spectrum embedding from 10 nearest neighbors using '{spec_key}' key.")
+        else:
+            print("[WARNING] Could not find spectral embedding key in NPZ. Skipping KNN estimation.")
+            
     # 3. Retrieve modalities and estimate redshift Z
     if not args.probing_weights_path:
         raise ValueError("[ERROR] Probing weights path is empty. Please provide a valid file path using --probing_weights_path.")
@@ -402,8 +482,13 @@ def main():
         raise FileNotFoundError(f"Unified probing weights dict not found or is a directory at: {prob_path}")
         
     probing_weights = torch.load(prob_path, map_location=device, weights_only=False)
-    # Filter to only allow image-based modalities (EuclidImage, EuclidImage_phase1, etc.) since we perform inference from images
-    z_keys = [k for k in probing_weights.keys() if k.startswith("Z/") and ("image" in k.lower() or "euclid" in k.lower())]
+    
+    if args.use_knn_spec and estimated_spec_emb is not None:
+        # Allow all estimators (image, spectrum, joint) when KNN spectral embedding is available
+        z_keys = [k for k in probing_weights.keys() if k.startswith("Z/")]
+    else:
+        # Filter to only allow image-based modalities (EuclidImage, EuclidImage_phase1, etc.) since we perform inference from images
+        z_keys = [k for k in probing_weights.keys() if k.startswith("Z/") and ("image" in k.lower() or "euclid" in k.lower())]
     
     if not z_keys:
         raise ValueError(f"No redshift probing models ('Z/*') found in {prob_path}")
@@ -449,7 +534,7 @@ def main():
             weight = 1.0 / (outliers + 1e-6)
         else:  # balanced (default)
             # Combines R^2, Bias, and NMAD to penalize positive systematic shifts and reward core precision
-            sort_val = r2_score / (nmad * (bias + 0.001))
+            sort_val = r2_score / (nmad * (bias + 0.01))
             weight = sort_val
             
         weighted_entries.append({
@@ -475,8 +560,23 @@ def main():
             target_key = item["target_key"]
             modality_name = item["modality_name"]
             prober, p_mean, p_scale, p_scaler_type, p_score, p_metrics = load_redshift_prober(prob_path, target_key, device)
+            
+            # Resolve correct feature vector for the prober
+            k_lower = target_key.lower()
+            if "concat" in k_lower:
+                feat = estimated_joint_concat if estimated_joint_concat is not None else image_embedding
+            elif "joint" in k_lower:
+                feat = estimated_joint_mean if estimated_joint_mean is not None else image_embedding
+            elif "spectrum" in k_lower or "spectra" in k_lower or "spec" in k_lower:
+                feat = estimated_spec_emb if estimated_spec_emb is not None else image_embedding
+            else:
+                feat = image_embedding
+                
+            feat_norm = feat / np.linalg.norm(feat).clip(min=1e-10)
+            emb_tensor_prober = torch.tensor(feat_norm, dtype=torch.float32).unsqueeze(0).to(device)
+            
             with torch.no_grad():
-                pred_z_scaled = prober(emb_tensor).cpu().numpy().flatten()[0]
+                pred_z_scaled = prober(emb_tensor_prober).cpu().numpy().flatten()[0]
             pred_z = float(pred_z_scaled * p_scale + p_mean)
             
             metrics_str = ""
@@ -486,16 +586,31 @@ def main():
             print(f"\n--> Evaluating {modality_name}: Predicted Z: {pred_z:.5f}{metrics_str}")
             selected_runs.append((modality_name, pred_z))
     else:
-        # Evaluate all available image estimators and print ensembling details
-        print(f"\n[INFO] Evaluating {len(weighted_entries)} Euclid image-based redshift estimators (Weights by '{best_by}'):")
+        # Evaluate all available estimators and print ensembling details
+        print(f"\n[INFO] Evaluating {len(weighted_entries)} redshift estimators (Weights by '{best_by}'):")
         preds = []
         weights = []
         for item in weighted_entries:
             target_key = item["target_key"]
             modality_name = item["modality_name"]
             prober, p_mean, p_scale, p_scaler_type, p_score, p_metrics = load_redshift_prober(prob_path, target_key, device)
+            
+            # Resolve correct feature vector for the prober
+            k_lower = target_key.lower()
+            if "concat" in k_lower:
+                feat = estimated_joint_concat if estimated_joint_concat is not None else image_embedding
+            elif "joint" in k_lower:
+                feat = estimated_joint_mean if estimated_joint_mean is not None else image_embedding
+            elif "spectrum" in k_lower or "spectra" in k_lower or "spec" in k_lower:
+                feat = estimated_spec_emb if estimated_spec_emb is not None else image_embedding
+            else:
+                feat = image_embedding
+                
+            feat_norm = feat / np.linalg.norm(feat).clip(min=1e-10)
+            emb_tensor_prober = torch.tensor(feat_norm, dtype=torch.float32).unsqueeze(0).to(device)
+            
             with torch.no_grad():
-                pred_z_scaled = prober(emb_tensor).cpu().numpy().flatten()[0]
+                pred_z_scaled = prober(emb_tensor_prober).cpu().numpy().flatten()[0]
             pred_z_val = float(pred_z_scaled * p_scale + p_mean)
             
             metrics_str = ""
@@ -594,31 +709,57 @@ def main():
             except Exception as e:
                 print(f"[WARNING] Error reading spectrum from Arrow record: {e}")
 
+        # Calculate dynamic gap between curves for offset stacking
+        all_curves = [generated_spectra[61], generated_spectra[21], generated_spectra[278]]
+        if real_spec is not None:
+            all_curves.append(real_spec)
+        all_curves_stacked = np.concatenate(all_curves)
+        p95 = np.percentile(all_curves_stacked, 95)
+        p5 = np.percentile(all_curves_stacked, 5)
+        amplitude = max(p95 - p5, 1e-3)
+        gap = 1.2 * amplitude
+        
+        if real_spec is not None:
+            offset_real = 0
+            offset_s3 = gap
+            offset_s2 = 2 * gap
+            offset_s1 = 3 * gap
+        else:
+            offset_real = 0
+            offset_s3 = 0
+            offset_s2 = gap
+            offset_s1 = 2 * gap
+
         # Choose visual layout
         if args.layout == "dashboard":
             print("\nRendering publication-quality side-by-side dashboard...")
-            fig = plt.figure(figsize=(20, 14), dpi=150)
-            gs = gridspec.GridSpec(3, 3, height_ratios=[2, 1, 1], width_ratios=[1, 1.1, 0.9], hspace=0.4, wspace=0.3)
+            fig = plt.figure(figsize=(20, 12), dpi=150)
+            gs = gridspec.GridSpec(
+                3, 3, 
+                height_ratios=[2.4, 1.0, 1.0], 
+                width_ratios=[0.9, 1.4, 0.9], 
+                hspace=0.45, 
+                wspace=0.10
+            )
             
             ax_meta = fig.add_subplot(gs[0, 0])
             ax_img = fig.add_subplot(gs[0, 1])
             ax_stats = fig.add_subplot(gs[0, 2])
             ax_spec_blue = fig.add_subplot(gs[1, :])
-            ax_spec_red = fig.add_subplot(gs[2, :])
+            ax_spec_red = fig.add_subplot(gs[2, :], sharey=ax_spec_blue)
             
             # --- Load & Render Meta data ---
-            query_meta = get_morphological_meta_str(galaxy_id, metadata)
+            query_meta = get_morphological_meta_str(galaxy_id, metadata, arrow_record, pred_z)
             ax_meta.axis('off')
             ax_meta.text(
                 0.5, 0.95, query_meta, 
                 transform=ax_meta.transAxes, 
-                fontsize=12,
-                linespacing=1.8,
+                fontsize=18,
+                linespacing=2.0,
                 horizontalalignment='center',
                 verticalalignment='top',
-                bbox=dict(boxstyle="round,pad=0.8", fc="ivory", alpha=0.95, ec="darkgrey", lw=1.0)
+                bbox=dict(boxstyle="round,pad=1.0", fc="ivory", alpha=0.95, ec="darkgrey", lw=1.0)
             )
-            ax_meta.set_title(r"\textbf{Physical and Morphological properties}", fontsize=14, fontweight='bold', color='navy', pad=15)
             
             # --- Load & Render Spectroscopic stats ---
             query_spec_meta = get_spectroscopic_meta_str(galaxy_id, metadata)
@@ -626,13 +767,12 @@ def main():
             ax_stats.text(
                 0.5, 0.95, query_spec_meta, 
                 transform=ax_stats.transAxes, 
-                fontsize=12,
-                linespacing=1.6,
+                fontsize=18,
+                linespacing=1.8,
                 horizontalalignment='center',
                 verticalalignment='top',
-                bbox=dict(boxstyle="round,pad=0.8", fc="aliceblue", alpha=0.95, ec="steelblue", lw=1.0)
+                bbox=dict(boxstyle="round,pad=1.0", fc="aliceblue", alpha=0.95, ec="steelblue", lw=1.0)
             )
-            ax_stats.set_title(r"\textbf{Spectroscopic properties}", fontsize=14, fontweight='bold', color='steelblue', pad=15)
             
             # --- Reconstruct and plot image ---
             rgb_img_plotted = False
@@ -687,36 +827,52 @@ def main():
             w_mid = (start_wl + end_wl) / 2
             
             # Blue Channel Plot
-            ax_spec_blue.plot(x_wavelengths, generated_spectra[61], color="#e74c3c", alpha=0.85, linewidth=0.75, label="DDPM Seed 61")
-            ax_spec_blue.plot(x_wavelengths, generated_spectra[21], color="#3498db", alpha=0.85, linewidth=0.75, label="DDPM Seed 21")
-            ax_spec_blue.plot(x_wavelengths, generated_spectra[278], color="#9b59b6", alpha=0.85, linewidth=0.75, label="DDPM Seed 278")
+            ax_spec_blue.plot(x_wavelengths, generated_spectra[61] + offset_s1, color="#e74c3c", alpha=0.85, linewidth=1.2, label="Seed 61")
+            ax_spec_blue.plot(x_wavelengths, generated_spectra[21] + offset_s2, color="#3498db", alpha=0.85, linewidth=1.2, label="Seed 21")
+            ax_spec_blue.plot(x_wavelengths, generated_spectra[278] + offset_s3, color="#9b59b6", alpha=0.85, linewidth=1.2, label="Seed 278")
             
             if real_spec is not None:
-                ax_spec_blue.plot(x_wavelengths, real_spec, color="#2c3e50", alpha=0.8, linewidth=1, label="Observed Spectrum (DESI)")
+                ax_spec_blue.plot(x_wavelengths, real_spec + offset_real, color="black", alpha=0.8, linewidth=1.2, label="Observed Spectrum (DESI)")
                 
             ax_spec_blue.set_xlim(start_wl, w_mid)
-            ax_spec_blue.set_title(r"\textbf{Spectrum (Blue Channel)}", fontsize=12, fontweight='bold', pad=8)
-            ax_spec_blue.set_ylabel(r"\textbf{Flux}", fontsize=11)
+            ax_spec_blue.tick_params(axis='both', which='major', labelsize=18)
             ax_spec_blue.grid(True, linestyle=':', alpha=0.5)
-            ax_spec_blue.legend(loc="upper right", frameon=True, facecolor='white', framealpha=0.9)
             plot_spectral_lines(ax_spec_blue, start_wl, w_mid, pred_z)
             
             # Red Channel Plot
-            ax_spec_red.plot(x_wavelengths, generated_spectra[61], color="#e74c3c", alpha=0.85, linewidth=0.75, label="DDPM Seed 61")
-            ax_spec_red.plot(x_wavelengths, generated_spectra[21], color="#3498db", alpha=0.85, linewidth=0.75, label="DDPM Seed 21")
-            ax_spec_red.plot(x_wavelengths, generated_spectra[278], color="#9b59b6", alpha=0.85, linewidth=0.75, label="DDPM Seed 278")
+            ax_spec_red.plot(x_wavelengths, generated_spectra[61] + offset_s1, color="#e74c3c", alpha=0.85, linewidth=1.2, label="Seed 61")
+            ax_spec_red.plot(x_wavelengths, generated_spectra[21] + offset_s2, color="#3498db", alpha=0.85, linewidth=1.2, label="Seed 21")
+            ax_spec_red.plot(x_wavelengths, generated_spectra[278] + offset_s3, color="#9b59b6", alpha=0.85, linewidth=1.2, label="Seed 278")
             
             if real_spec is not None:
-                ax_spec_red.plot(x_wavelengths, real_spec, color="#2c3e50", alpha=0.8, linewidth=0.75, label="Observed Spectrum (DESI)")
+                ax_spec_red.plot(x_wavelengths, real_spec + offset_real, color="black", alpha=0.8, linewidth=1.2, label="Observed Spectrum (DESI)")
                 
             ax_spec_red.set_xlim(w_mid, end_wl)
-            ax_spec_red.set_title(r"\textbf{Spectrum (Red Channel)}", fontsize=12, fontweight='bold', pad=8)
-            ax_spec_red.set_ylabel(r"\textbf{Flux}", fontsize=11)
-            ax_spec_red.set_xlabel(r"\textbf{Observed Wavelength [\AA]}", fontsize=11)
+            ax_spec_red.set_xlabel(r"\textbf{Observed Wavelength} [\AA]", fontsize=20, fontweight='bold')
+            ax_spec_red.tick_params(axis='both', which='major', labelsize=18)
             ax_spec_red.grid(True, linestyle=':', alpha=0.5)
             plot_spectral_lines(ax_spec_red, w_mid, end_wl, pred_z)
             
-            plt.suptitle(rf"\textbf{{Cross-Modal Synthesis Dashboard | Galaxy ID: {galaxy_id} | Modality: {modality_name} | Est. Redshift }} $z = {pred_z:.5f}$", fontsize=16, fontweight='bold', y=0.98)
+            # Shared Y Label
+            y_label_cgs = r"\textbf{Spectral Flux} + Offset"
+            blue_pos = ax_spec_blue.get_position()
+            red_pos  = ax_spec_red.get_position()
+            y_mid = (blue_pos.y0 + red_pos.y1) / 2.0
+            fig.text(0.075, y_mid, y_label_cgs, fontsize=20, fontweight='bold',
+                     rotation=90, va='center', ha='center')
+            
+            # Split legend into two and place them on both sides of the X-axis label
+            handles, labels = ax_spec_red.get_legend_handles_labels()
+            half = len(handles) // 2
+            
+            leg1 = ax_spec_red.legend(handles[:half], labels[:half], loc='upper left', bbox_to_anchor=(0.0, -0.12), 
+                                      ncol=len(handles[:half]), frameon=True, facecolor='white', framealpha=0.9, fontsize=15)
+            ax_spec_red.add_artist(leg1)
+            
+            ax_spec_red.legend(handles[half:], labels[half:], loc='upper right', bbox_to_anchor=(1.0, -0.12), 
+                               ncol=len(handles[half:]), frameon=True, facecolor='white', framealpha=0.9, fontsize=15)
+            
+            plt.subplots_adjust(top=0.98, bottom=0.08, left=0.12, right=0.96)
             
         else:
             # Default stacked layout
@@ -748,12 +904,12 @@ def main():
                 
                 # Plot Real Spectrum (Ground Truth reference)
                 if real_spec is not None:
-                    ax.plot(x_wavelengths, real_spec[start_ch:end_ch], color="#2c3e50", alpha=0.9, linewidth=1.5, label="Ground Truth Spectrum")
+                    ax.plot(x_wavelengths, real_spec[start_ch:end_ch] + offset_real, color="#2c3e50", alpha=0.9, linewidth=1.5, label="Ground Truth Spectrum")
                     
                 # Plot three generated seeds
-                ax.plot(x_wavelengths, generated_spectra[61][start_ch:end_ch], color="#e74c3c", alpha=0.85, linewidth=1.1, label="DDPM Seed 61")
-                ax.plot(x_wavelengths, generated_spectra[21][start_ch:end_ch], color="#3498db", alpha=0.85, linewidth=1.1, label="DDPM Seed 21")
-                ax.plot(x_wavelengths, generated_spectra[278][start_ch:end_ch], color="#9b59b6", alpha=0.85, linewidth=1.1, label="DDPM Seed 278")
+                ax.plot(x_wavelengths, generated_spectra[61][start_ch:end_ch] + offset_s1, color="#e74c3c", alpha=0.85, linewidth=1.1, label="DDPM Seed 61")
+                ax.plot(x_wavelengths, generated_spectra[21][start_ch:end_ch] + offset_s2, color="#3498db", alpha=0.85, linewidth=1.1, label="DDPM Seed 21")
+                ax.plot(x_wavelengths, generated_spectra[278][start_ch:end_ch] + offset_s3, color="#9b59b6", alpha=0.85, linewidth=1.1, label="DDPM Seed 278")
                 
                 # Dynamic color coding of panel background
                 local_mean_std = float(np.mean(pointwise_stds[start_ch:end_ch]))
@@ -779,7 +935,7 @@ def main():
                 plot_spectral_lines(ax, start_wl, end_wl, pred_z)
                 
                 if i == 3:
-                    ax.set_ylabel("Normalized Flux Scale", fontsize=11, fontweight="bold")
+                    ax.set_ylabel("Spectral Flux + Offset", fontsize=11, fontweight="bold")
                 if i == 6:
                     ax.set_xlabel("Observed Wavelength [Å]", fontsize=11, fontweight="bold")
                     

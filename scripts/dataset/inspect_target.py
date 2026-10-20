@@ -28,7 +28,7 @@ from datasets import load_from_disk
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[sys.stdout]
+    stream=sys.stdout
 )
 logger = logging.getLogger("astropt_target_inspector")
 
@@ -90,12 +90,6 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="/home/valonso/iac18_mhuertas_shared/valonso/astroPT/logs/dataset_images_flux_analysis/inspections",
         help="Directory to save generated diagnostic dashboard PDF or PNG plots."
-    )
-    parser.add_argument(
-        "--dark_registry",
-        type=str,
-        default="/home/valonso/iac18_mhuertas_shared/valonso/astroPT/logs/dataset_images_flux_analysis/dark_galaxies_registry.csv",
-        help="Path to the dark galaxies CSV registry to check anomaly classifications."
     )
     return parser.parse_args()
 
@@ -244,15 +238,6 @@ def main():
         except Exception as e:
             logger.error(f"Failed to load FITS metadata: {e}")
             
-    # Load Anomaly Classification Registry
-    df_anomalies = None
-    if os.path.exists(args.dark_registry):
-        try:
-            logger.info(f"Loading anomaly blacklist registry from: {args.dark_registry}")
-            df_anomalies = pd.read_csv(args.dark_registry).drop_duplicates(subset=["TargetID"]).set_index("TargetID")
-        except Exception as e:
-            logger.error(f"Failed to load anomaly registry: {e}")
-
     # -------------------------------------------------------------------------
     # STEP 3: Generate Visual Inspector Dashboard for each found target
     # -------------------------------------------------------------------------
@@ -273,13 +258,6 @@ def main():
                 if f in meta_row:
                     flags.append(f"{f}={int(meta_row[f])}")
             flags_str = ", ".join(flags)
-            
-        # Pull anomaly class
-        q_class = "Good (Passed Audit)"
-        q_color = "darkgreen"
-        if df_anomalies is not None and tid in df_anomalies.index:
-            q_class = str(df_anomalies.loc[tid]["quality_class"])
-            q_color = "darkred"
             
         z = data["redshift"]
         
@@ -321,14 +299,14 @@ def main():
         stats_rows = []
         for ch_name, arr in [("VIS", vis), ("Y", y), ("J", j), ("H", h)]:
             if arr is None:
-                stats_rows.append(rf"\textbf{{{ch_name}}}: & MISSING")
+                stats_rows.append(rf"\textbf{{{ch_name}}}: MISSING")
             else:
                 nan_mask = np.isnan(arr) | np.isinf(arr)
                 nan_frac = np.mean(nan_mask)
                 clean_arr = arr[~nan_mask]
                 
                 if len(clean_arr) == 0:
-                    stats_rows.append(rf"\textbf{{{ch_name}}}: & NaN Corrupted")
+                    stats_rows.append(rf"\textbf{{{ch_name}}}: NaN Corrupted")
                 else:
                     std_val = np.std(clean_arr)
                     mean_val = np.mean(clean_arr)
@@ -336,29 +314,21 @@ def main():
                     
                     flat_tag = " [FLAT]" if std_val < 1e-4 else ""
                     stats_rows.append(
-                        rf"\textbf{{{ch_name}}}: & Mean: {mean_val:.2f} | Std: {std_val:.1e}{flat_tag} | Max: {max_val:.2f} | NaNs: {nan_frac:.1%}"
+                        rf"\textbf{{{ch_name}}}: Mean: {mean_val:.2f} | Std: {std_val:.1e}{flat_tag} | Max: {max_val:.2f} | NaNs: {nan_frac:.1%}"
                     )
                     
-        stats_block = "\\\\\n".join(stats_rows)
+        stats_block = " \\\\\n".join(stats_rows)
         
-        panel_text = rf"""
-        \begin{{tabular}}{{ll}}
-        \textbf{{Target Profile}} & \\\\
-        \hline
-        Split/Partition: & {data['split']} / {data['partition']} \\\\
-        Coordinates: & {ra_dec_str} \\\\
-        Redshift: & $z = {z:.5f}$ \\\\
-        & \\\\
-        \textbf{{Quality Classification}} & \\\\
-        \hline
-        Audit Status: & \textcolor{{{q_color}}}{{\textbf{{{q_class}}}}} \\\\
-        Survey Flags: & \texttt{{{flags_str if flags_str else '(No catalog data)'}}} \\\\
-        & \\\\
-        \textbf{{Image Pixel Statistics}} & \\\\
-        \hline
-        {stats_block}
-        \end{{tabular}}
-        """
+        panel_text = rf"""\textbf{{Target Profile}} \\
+                ------------------------------------------------------------- \\
+                Split/Partition: {data['split']} / {data['partition']} \\
+                Coordinates: {ra_dec_str} \\
+                Redshift: $z = {z:.5f}$ \\
+                Survey Flags: \texttt{{{flags_str if flags_str else '(No catalog data)'}}} \\
+                \\
+                \textbf{{Image Pixel Statistics}} \\
+                ------------------------------------------------------------- \\
+                {stats_block}"""
         ax_text.text(
             0.0, 0.9, panel_text, 
             ha='left', va='top', transform=ax_text.transAxes, fontsize=11, family='serif'

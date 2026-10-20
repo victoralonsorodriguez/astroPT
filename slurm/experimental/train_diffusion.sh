@@ -31,7 +31,7 @@ fi
 PYTHON_SCRIPT="$REPO_ROOT/scripts/experimental/train_diffusion.py"
 DATA_DIR="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated"
 EMBEDDINGS_PATH="/home/valonso/iac18_mhuertas_shared/valonso/astroPT/logs/astropt_20260601_hybrid_optimized/embeddings/best_img-mean_spec-rank_final_iso_j-mean/embeddings_all.npz"
-SAVE_DIR="$REPO_ROOT/logs/astropt_20260601_hybrid_optimized/diffusion"
+SAVE_DIR=""
 METADATA_PATH="/home/valonso/iac18_aasensio_shared/euclid_dr1/catalog/catalog_MER_DR1_DESI_DR1_combined_wide_deep_v1.1_FILTERED.fits"
 CONTEXT_DIM=768
 MAX_RUN_HOURS="7:55:00"
@@ -52,6 +52,15 @@ shift $((OPTIND - 1))
 
 # Absolute paths
 EMBEDDINGS_PATH=$(readlink -f "$EMBEDDINGS_PATH" || echo "$EMBEDDINGS_PATH")
+
+if [ -z "$SAVE_DIR" ]; then
+  # Automatically resolve SAVE_DIR as the great-grandparent of EMBEDDINGS_PATH + /diffusion
+  EMB_PARENT=$(dirname "$EMBEDDINGS_PATH")
+  EMB_GPARENT=$(dirname "$EMB_PARENT")
+  RUN_DIR=$(dirname "$EMB_GPARENT")
+  SAVE_DIR="$RUN_DIR/diffusion"
+fi
+
 DATA_DIR=$(readlink -f "$DATA_DIR" || echo "$DATA_DIR")
 SAVE_DIR=$(readlink -f "$SAVE_DIR" || echo "$SAVE_DIR")
 if [[ -n "${METADATA_PATH:-}" ]]; then

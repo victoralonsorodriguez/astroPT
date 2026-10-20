@@ -25,14 +25,18 @@ echo "------------------------------------------------------"
 echo "Training AstroCLIP ($SLURM_JOB_ID) on node $SLURM_NODELIST - $NOW"
 echo "------------------------------------------------------"
 
-#--- DEFAULT VALUES ---#
-# Automatically detect the repository root
-if [ -n "$SLURM_SUBMIT_DIR" ]; then
-    REPO_ROOT="$SLURM_SUBMIT_DIR"
-else
-    REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+# Robust repository root detection based on script location
+# (Script is in slurm/legacy/, so REPO_ROOT is two levels up)
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+
+# If SLURM has moved us to /var/spool, correct REPO_ROOT to the launch working directory
+if [[ "$REPO_ROOT" == "/var/spool"* ]]; then
+    REPO_ROOT="$PWD"
 fi
-PYTHON_SCRIPT="$REPO_ROOT/scripts/train_astroclip_arrow.py"
+
+#--- DEFAULT VALUES ---#
+PYTHON_SCRIPT="$REPO_ROOT/scripts/legacy/train_astroclip_arrow.py"
 DATA_DIR="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated"
 TRAIN_DIR="logs/astroclip_arrow"
 TRAIN_NAME="New Train"
@@ -44,6 +48,7 @@ EXTRA_ARGS=""
 #--- ARGUMENT PARSING (FLAGS) ---#
 while getopts ":r:t:a:n:d:m:k:x:" opt; do
   case $opt in
+    r) REPO_ROOT="$OPTARG" ;;
     t) TRAIN_DIR="$OPTARG" ;;
     a) DATA_DIR="$OPTARG" ;;
     n) TRAIN_NAME="$OPTARG" ;;
@@ -60,10 +65,10 @@ TRAIN_DIR=$(readlink -f "$TRAIN_DIR")
 echo "Changing directory to: $REPO_ROOT"
 cd "$REPO_ROOT" || { echo "[ERROR]: Cannot find REPO_ROOT: $REPO_ROOT"; exit 1; }
 
-source "$REPO_ROOT/.venv/bin/activate""
+source "$REPO_ROOT/.venv/bin/activate"
 
-export UV_CACHE_DIR="/home/valonso/iac18_mhuertas_shared/valonso/cache/uv_cache"
-export HF_HOME="/home/valonso/iac18_mhuertas_shared/valonso/cache/huggingface"
+export UV_CACHE_DIR="$REPO_ROOT/../cache/uv_cache"
+export HF_HOME="$REPO_ROOT/../cache/huggingface"
 export OMP_NUM_THREADS=16
 
 ASTROCLIP_ROOT_PATH="${ASTROCLIP_ROOT:-$REPO_ROOT/../AstroCLIP}"
@@ -76,8 +81,10 @@ if [[ ! -f "$ASTRODINO_CKPT" || ! -f "$SPECFORMER_CKPT" ]]; then
   [[ ! -f "$SPECFORMER_CKPT" ]] && echo "  - $SPECFORMER_CKPT"
   echo "[FATAL] Aborting before GPU initialization to save compute time."
   exit 2
+fi
 
 # Fast dependency check to avoid burning GPU time on immediate import crashes.
+if ! REPO_ROOT="$REPO_ROOT" "$REPO_ROOT/.venv/bin/python" - <<'PY'
 import importlib
 import os
 from pathlib import Path
@@ -115,6 +122,9 @@ if missing:
 
 print("[OK] Python dependency preflight passed (dinov2 + astroclip).")
 PY
+then
+  exit 2
+fi
 
 echo "Training AstroCLIP in DDP GPU:"
 echo "  DATA DIR:      $DATA_DIR"
@@ -123,11 +133,9 @@ echo "  TRAIN NAME:    $TRAIN_NAME"
 echo "  TRAIN MODE:    $TRAIN_MODE"
 if [[ -n "$EXTRA_ARGS" ]]; then
   echo "  EXTRA ARGS:    $EXTRA_ARGS"
+fi
 
 # Use torchrun to spawn 4 DDP workers, matching train_astropt_multiGPU.sh.
-# Plain `python script.py` lets Lightning try to spawn subprocesses internally,
-# which deadlocks in SLURM because Lightning detects the SLURM environment and
-# expects 4 separate tasks (ntasks=4) rather than spawning them itself.
 CMD=(torchrun --standalone --nproc_per_node=4 "$PYTHON_SCRIPT" \
     --data_dir "$DATA_DIR" \
     --train_dir "$TRAIN_DIR" \
@@ -138,9 +146,9 @@ CMD=(torchrun --standalone --nproc_per_node=4 "$PYTHON_SCRIPT" \
     --ddp_num_gpus 4)
 
 if [[ -n "$EXTRA_ARGS" ]]; then
-  # shellcheck disable=SC2206
-  EXTRA_ARGS_ARRAY=($EXTRA_ARGS)
+  eval "EXTRA_ARGS_ARRAY=($EXTRA_ARGS)"
   CMD+=("${EXTRA_ARGS_ARRAY[@]}")
+fi
 
 "${CMD[@]}"
 

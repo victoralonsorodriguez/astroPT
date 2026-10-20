@@ -30,30 +30,38 @@ if [[ "$REPO_ROOT" == "/var/spool"* ]]; then
     fi
 fi
 
-PYTHON_SCRIPT="$REPO_ROOT/scripts/analysis/dashboards/dash_probing_differences.py"
+USE_FULL=0
 
 #--- ARGUMENT PARSING (FLAGS) ---#
 EMB_DIR=""
 SAVE_DIR=""
 COMPARE_EMB_DIR=""
 
-while getopts ":r:e:s:c:h" opt; do
+while getopts ":r:e:s:c:fh" opt; do
   case $opt in
     r) REPO_ROOT="$OPTARG" ;;
     s) SAVE_DIR="$OPTARG" ;;
     e) EMB_DIR="$OPTARG" ;;
     c) COMPARE_EMB_DIR="$OPTARG" ;;
+    f) USE_FULL=1 ;;
     h)
-      echo "Usage: $0 -e EMB_DIR [-c COMPARE_EMB_DIR] [-s SAVE_DIR] [-r REPO_ROOT]"
+      echo "Usage: $0 -e EMB_DIR [-c COMPARE_EMB_DIR] [-s SAVE_DIR] [-r REPO_ROOT] [-f]"
       echo "  -e: Embedding folder of the hybrid model run containing downstream_results.csv"
       echo "  -c: Embedding folder of the comparison run containing downstream_results.csv"
       echo "  -s: Save directory for the diff plots"
       echo "  -r: Custom repository root"
+      echo "  -f: Use full 3-bar comparison (spectra/images/joint) instead of joint-only TFM results"
       exit 0
       ;;
     \?) echo "[ERROR] Invalid option -$OPTARG" >&2; exit 1 ;;
   esac
 done
+
+if [[ "$USE_FULL" -eq 1 ]]; then
+    PYTHON_SCRIPT="$REPO_ROOT/scripts/analysis/dashboards/dash_probing_differences.py"
+else
+    PYTHON_SCRIPT="$REPO_ROOT/scripts/analysis/dashboards/dash_probing_differences_results.py"
+fi
 
 shift $((OPTIND - 1))
 

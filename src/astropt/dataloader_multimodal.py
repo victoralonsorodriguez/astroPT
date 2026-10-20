@@ -52,7 +52,7 @@ class MultimodalDatasetArrow(Dataset):
 
         # 2. Smart column selection
         available_cols = self.ds.column_names
-        cols_to_keep = ['targetid', 'redshift'] # Keeping redshift for dashboard titles
+        cols_to_keep = ['targetid', 'redshift', 'object_id', 'OBJECT_ID', 'objectid', 'OBJID', 'euclid_id'] # Keeping redshift and object_id for downstream matching
         for proc in self.processors.values():
             cols_to_keep.extend(proc.required_columns())
         
@@ -386,9 +386,12 @@ class MultimodalDatasetArrow(Dataset):
                 if targetid is not None:
                     targetid = int(targetid)
                 
+                obj_id = item.get('object_id') or item.get('OBJECT_ID') or item.get('objectid') or item.get('OBJID') or item.get('euclid_id')
+                
                 sample = {
                     "idx": current_idx,
                     "targetid": targetid,
+                    "object_id": int(obj_id) if obj_id is not None else -1,
                     "redshift": item.get('redshift')
                 }
 

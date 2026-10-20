@@ -32,7 +32,7 @@ from tqdm import tqdm
 from torchvision.transforms import CenterCrop
 
 # Local path setup
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 ASTROCLIP_ROOT = REPO_ROOT.parent / "AstroCLIP"
 
 if str(REPO_ROOT / "src") not in sys.path:
@@ -42,7 +42,8 @@ if str(ASTROCLIP_ROOT) not in sys.path:
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.append(str(Path(__file__).resolve().parent))
 
-from astropt.euclid_desi_arrow_dataloader import EuclidDESIDatasetArrow
+from astropt.dataloader_multimodal import MultimodalDatasetArrow
+from astropt.processors import EuclidImageProcessor, DESISpectrumProcessor
 from astropt.model import ModalityConfig, ModalityRegistry
 
 from astroclip.models.astroclip import ImageHead, SpectrumHead
@@ -235,26 +236,36 @@ def main():
         spectra_size=spectra_size,
         spectra_patch_size=spectra_patch_size,
     )
+    val_processors = {
+        "images": EuclidImageProcessor(
+            filters=['VIS', 'Y', 'J', 'H'],
+            spiral=False,
+            stochastic=False,
+            stage="val"
+        ),
+        "spectra": DESISpectrumProcessor(
+            stochastic=False,
+            inverse=False
+        )
+    }
 
-    tf = EuclidDESIDatasetArrow.data_transforms(
-        norm_type_img="asinh",
-        norm_scaler_img=1.0,
-        norm_const_img=7.603847,
-        norm_type_spec="asinh",
-        norm_scaler_spec=1.0,
-        norm_const_spec=7.956048,
+    tf = MultimodalDatasetArrow.data_transforms(
+        norm_type_images="asinh",
+        norm_scaler_images=1.0,
+        norm_const_images=7.603847,
+        norm_type_spectra="asinh",
+        norm_scaler_spectra=1.0,
+        norm_const_spectra=7.956048,
         stage="val",
     )
 
-    ds = EuclidDESIDatasetArrow(
+    ds = MultimodalDatasetArrow(
         arrow_folder_root=str(data_dir),
         split="test",
+        processors=val_processors,
         modality_registry=registry,
-        spiral=False,
-        stochastic=False,
         transform=tf,
     )
-
     collate = CollateForAstroCLIP(
         images_size=images_size,
         images_patch_size=images_patch_size,

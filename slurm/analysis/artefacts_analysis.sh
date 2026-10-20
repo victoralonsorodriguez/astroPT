@@ -6,10 +6,10 @@
 #SBATCH --account=iac18
 #SBATCH --nodes=1                
 #SBATCH --ntasks=1               
-#SBATCH --cpus-per-task=16       
+#SBATCH --cpus-per-task=32       
 #SBATCH --gpus-per-task=1        
 #SBATCH --mem=64G                
-#SBATCH --time=01:00:00         
+#SBATCH --time=04:00:00         
 
 #--- LOGS FILES ---#
 #SBATCH --output=logs/astropt_audit_%j.out
@@ -65,9 +65,10 @@ BASE_MODALITY="EuclidImage"
 WEIGHTS_DIR=""
 EMB_DIR=""
 SAVE_DIR=""
+ANCHORS=""
 
 #--- ARGUMENT PARSING (FLAGS) ---#
-while getopts ":w:e:s:d:m:n:p:b:" opt; do
+while getopts ":w:e:s:d:m:n:p:b:a:" opt; do
   case $opt in
     w) WEIGHTS_DIR="$OPTARG" ;;
     e) EMB_DIR="$OPTARG" ;;
@@ -77,13 +78,14 @@ while getopts ":w:e:s:d:m:n:p:b:" opt; do
     n) N_CANDIDATES="$OPTARG" ;;
     p) N_PLOT="$OPTARG" ;;
     b) BASE_MODALITY="$OPTARG" ;;
+    a) ANCHORS="$OPTARG" ;;
     \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
   esac
 done
 
 if [ -z "$WEIGHTS_DIR" ] || [ -z "$EMB_DIR" ]; then
   echo "[ERROR]: WEIGHTS_DIR (-w) and EMB_DIR (-e) are required"
-  echo "Usage: $0 -w <weights_dir> -e <embeddings_dir> [-s save_dir] [-d data_dir] [-m metadata_path] [-n n_candidates] [-p n_plot] [-b base_modality]"
+  echo "Usage: $0 -w <weights_dir> -e <embeddings_dir> [-s save_dir] [-d data_dir] [-m metadata_path] [-n n_candidates] [-p n_plot] [-b base_modality] [-a \"anchor_ids\"]"
   exit 1
 fi
 
@@ -139,6 +141,11 @@ if [ -n "$SAVE_DIR" ]; then
     OUTPUT_ARG="--output_dir $SAVE_DIR"
 fi
 
+ANCHORS_ARG=""
+if [ -n "$ANCHORS" ]; then
+    ANCHORS_ARG="--anchor_ids $ANCHORS"
+fi
+
 echo "Artifact Detection Configuration:"
 echo "    CHECKPOINT:     $CKPT_PATH"
 echo "    EMB DIR:        $DETECTED_EMB"
@@ -149,6 +156,9 @@ echo "    N PLOT:         $N_PLOT"
 echo "    BASE MODALITY:  $BASE_MODALITY"
 if [ -n "$SAVE_DIR" ]; then
     echo "    SAVE DIR:       $SAVE_DIR"
+fi
+if [ -n "$ANCHORS" ]; then
+    echo "    ANCHORS:        $ANCHORS"
 fi
 echo "--------------------------------------------------------"
 
@@ -161,7 +171,8 @@ python3 "$REPO_ROOT/scripts/analysis/anomalies/artefacts_analysis.py" \
     --n_candidates "$N_CANDIDATES" \
     --n_plot "$N_PLOT" \
     --base_modality "$BASE_MODALITY" \
-    $OUTPUT_ARG
+    $OUTPUT_ARG \
+    $ANCHORS_ARG
 
 echo "--------------------------------------------------------"
 echo "AstroPT Artifact Detection Finished Successfully"

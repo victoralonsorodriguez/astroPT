@@ -18,11 +18,11 @@ fi
 LAUNCH_SCRIPT="$REPO_ROOT/slurm/trainers/launch_pipeline.sh"
 
 # --- CONFIGURATION --- #
-TARGET_DATE="2026-06-13 4:00:00"
-CONFIG_FILE="$REPO_ROOT/config/20260612_Autoregresive_Optimized.yaml"
+TARGET_DATE="2026-06-23 9:15:00"
+CONFIG_FILE="$REPO_ROOT/config/20260621_Autoregresive_NoTokMix.yaml"
 
 # IMPORTANT: Point to the same directory and set init_from to resume
-TRAIN_DIR="/mnt/data_proj/iac18_mhuertas_shared/valonso/astroPT/logs/astropt_20260612_autoregresive_optimized"
+TRAIN_DIR="/mnt/data_proj/iac18_mhuertas_shared/valonso/astroPT/logs/astropt_20260621_autoregresive_notokmix"
 
 # RESUMING ARGUMENTS
 EXTRA_ARGS="--init_from resume"
@@ -42,4 +42,4 @@ else
 fi
 
 echo "Launching resume pipeline..."
-$LAUNCH_SCRIPT -c "$CONFIG_FILE" -t "$TRAIN_DIR" -x "$EXTRA_ARGS" -m "train"
+$LAUNCH_SCRIPT -c "$CONFIG_FILE" -t "$TRAIN_DIR" -x "$EXTRA_ARGS" # -m "train"

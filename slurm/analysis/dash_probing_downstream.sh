@@ -99,13 +99,10 @@ export PATH="$HOME/.TinyTeX/bin/x86_64-linux:$PATH"
 export MPLCONFIGDIR="/home/valonso/iac18_mhuertas_shared/valonso/cache/matplotlib"
 export XDG_CACHE_HOME="/home/valonso/iac18_mhuertas_shared/valonso/cache"
 
-# SAVE_DIR is now optional; defaults to EMB_DIR/downstream_tasks if not provided
+# SAVE_DIR is now optional; python script defaults to the folder of the evaluation results CSV
 if [ -n "${SAVE_DIR:-}" ]; then
     SAVE_DIR=$(readlink -f "$SAVE_DIR")
     SAVE_ARG="--save_dir $SAVE_DIR"
-elif [ -n "$EMB_DIR" ]; then
-    # Default to current embedding folder's downstream_tasks
-    SAVE_ARG="--save_dir $EMB_DIR"
 else
     SAVE_ARG=""
 fi
@@ -129,8 +126,7 @@ BASELINE_MAP["${LOGS_BASE}/astropt_20260611_filter_unimodal_images"]="AstroPT Ba
 BASELINE_MAP["${LOGS_BASE}/supervised_baseline_images_FILTERED/supervised_baseline_images_results.csv"]="Images Supervised"
 BASELINE_MAP["${LOGS_BASE}/astropt_20260607_filter_unimodal_spectra"]="AstroPT Baseline Spectra"
 BASELINE_MAP["${LOGS_BASE}/supervised_baseline_spectra_FILTERED/supervised_baseline_spectra_results.csv"]="Spectra Supervised"
-BASELINE_MAP["${LOGS_BASE}/astroclip_20260422_matchingastropt/embeddings/astroclip-step0031000-valloss0.6454"]="AstroCLIP"
-#BASELINE_MAP["${LOGS_BASE}/AION_freeze/embeddings/aion_embeddings"]="AION"
+BASELINE_MAP["${LOGS_BASE}/astroclip_20260616_astroclip_filtered/embeddings/astroclip-step0024000-valloss0.4891"]="AstroCLIP"
 BASELINE_MAP["${LOGS_BASE}/astropt_20260605_original"]="AstroPT original"
 BASELINE_MAP["${LOGS_BASE}/astropt_20260601_hybrid_optimized/"]="AstroPT Hybrid optimized"
 BASELINE_MAP["${LOGS_BASE}/astropt_20260612_autoregresive_optimized/"]="AstroPT Autoregresive optimized"

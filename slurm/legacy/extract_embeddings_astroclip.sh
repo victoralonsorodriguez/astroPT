@@ -17,14 +17,17 @@
 
 set -euo pipefail
 
-#--- DEFAULT VALUES ---#
-# Automatically detect the repository root
-if [ -n "$SLURM_SUBMIT_DIR" ]; then
-    REPO_ROOT="$SLURM_SUBMIT_DIR"
-else
-    REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+# Robust repository root detection based on script location
+# (Script is in slurm/legacy/, so REPO_ROOT is two levels up)
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+
+# If SLURM has moved us to /var/spool, correct REPO_ROOT to the launch working directory
+if [[ "$REPO_ROOT" == "/var/spool"* ]]; then
+    REPO_ROOT="$PWD"
 fi
-PYTHON_SCRIPT="$REPO_ROOT/scripts/extract_embeddings_astroclip.py"
+
+PYTHON_SCRIPT="$REPO_ROOT/scripts/legacy/extract_embeddings_astroclip.py"
 DATA_DIR="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated"
 EXP_TAG=""
 
@@ -43,6 +46,7 @@ print_usage() {
 #--- ARGUMENT PARSING ---#
 while getopts ":r:w:s:a:x:h" opt; do
   case $opt in
+    r) REPO_ROOT="$OPTARG" ;;
     w) WEIGHTS_DIR="$OPTARG" ;;
     s) SAVE_DIR="$OPTARG" ;;
     a) DATA_DIR="$OPTARG" ;;
@@ -56,6 +60,7 @@ if [[ -z "${WEIGHTS_DIR:-}" || -z "${SAVE_DIR:-}" ]]; then
   echo "[ERROR] Both -w and -s are required."
   print_usage
   exit 1
+fi
 
 # Absolute output path
 WEIGHTS_DIR=$(readlink -f "$WEIGHTS_DIR")
@@ -71,10 +76,10 @@ echo "-----------------------------------------------"
 echo "Changing directory to: $REPO_ROOT"
 cd "$REPO_ROOT" || { echo "[ERROR]: Cannot find REPO_ROOT: $REPO_ROOT"; exit 1; }
 
-source "$REPO_ROOT/.venv/bin/activate""
+source "$REPO_ROOT/.venv/bin/activate"
 
-export UV_CACHE_DIR="/home/valonso/iac18_mhuertas_shared/valonso/cache/uv_cache"
-export HF_HOME="/home/valonso/iac18_mhuertas_shared/valonso/cache/huggingface"
+export UV_CACHE_DIR="$REPO_ROOT/../cache/uv_cache"
+export HF_HOME="$REPO_ROOT/../cache/huggingface"
 
 echo "AstroCLIP Embedding Extraction Configuration:"
 echo "    DATA DIR:       $DATA_DIR"
@@ -82,6 +87,7 @@ echo "    WEIGHTS DIR:    $WEIGHTS_DIR"
 echo "    SAVE DIR:       $SAVE_DIR"
 if [[ -n "$EXP_TAG" ]]; then
   echo "    EXP TAG:        $EXP_TAG"
+fi
 
 CMD=(python "$PYTHON_SCRIPT" \
     --weights_dir "$WEIGHTS_DIR" \
@@ -90,6 +96,7 @@ CMD=(python "$PYTHON_SCRIPT" \
 
 if [[ -n "$EXP_TAG" ]]; then
   CMD+=(--exp_tag "$EXP_TAG")
+fi
 
 "${CMD[@]}"
 

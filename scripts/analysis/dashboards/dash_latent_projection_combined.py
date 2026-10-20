@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Dict, Tuple, Any, List, Optional
 
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import numpy as np
 import pandas as pd
 import umap
@@ -48,12 +49,13 @@ warnings.simplefilter('ignore', category=AstropyWarning)
 # Plotting Style (PRESERVED - DO NOT MODIFY)
 plt.rcParams['text.latex.preamble'] = r'''
             \usepackage{siunitx}
-            \usepackage{bm}
             \usepackage{amsmath} 
+            \usepackage{times}
+            \usepackage{bm}
             \sisetup{detect-family, separate-uncertainty=true, output-decimal-marker={.}}
             '''
 plt.rc('text', usetex=True)
-plt.rc('font', family='serif', weight='bold') 
+plt.rc('font', family='serif') 
 
 # Constants
 UMAP_PARAMS = {
@@ -204,53 +206,35 @@ def plot_combined_standard_grid(
     
     def log_transform(x): return np.log10(np.where(x <= 0, 1e-5, x)) 
 
-    # Plot Configurations (Preserved)
     CONFIGS = {
-        "Physics": [
-            {"col": "Z", "label": r"Redshift (z)", "cat": False, "trans": None},
-            {"col": "LOGMSTAR", "label": r"Stellar Mass ($\log M_*$)", "cat": False, "trans": None},
-            {"col": "LOGSFR", "label": r"SFR ($\log \psi$)", "cat": False, "trans": None},
-            {"col": "GR", "label": r"Color ($g-r$)", "cat": False, "trans": None},
-            {"col": "SPECTYPE", "label": "Spectral Type", "cat": True, "trans": None},
-            {"col": "data_set_release", "label": "Data Set Release", "cat": True, "trans": None},
-        ],
-        "Chemistry": [
-            {"col": "flux_detection_total", "label": r"Total Flux ($\log$)", "cat": False, "trans": log_transform},
-            {"col": "HALPHA_EW", "label": r"H$\alpha$ EW ($\log$)", "cat": False, "trans": log_transform},
-            {"col": "NII_6584_FLUX", "label": r"[NII] Flux ($\log$)", "cat": False, "trans": log_transform},
-            {"col": "HALPHA_FLUX", "label": r"H$\alpha$ Flux ($\log$)", "cat": False, "trans": log_transform},
-            {"col": "OIII_5007_FLUX", "label": r"[OIII] Flux ($\log$)", "cat": False, "trans": log_transform},
-            {"col": "HBETA_FLUX", "label": r"H$\beta$ Flux ($\log$)", "cat": False, "trans": log_transform},
-        ],
-        "Morphology": [
-            {"col": "sersic_sersic_vis_radius", "label": r"Sersic VIS Radius ($\log$)", "cat": False, "trans": log_transform},
-            {"col": "sersic_sersic_vis_index", "label": r"Sersic VIS Index", "cat": False, "trans": None},
-            {"col": "sersic_sersic_vis_axis_ratio", "label": r"Sersic VIS Axis Ratio", "cat": False, "trans": None},
-            {"col": "has_spiral_arms_yes", "label": r"Spiral Arms Prob", "cat": False, "trans": None},
-            {"col": "smoothness", "label": r"Smoothness", "cat": False, "trans": None},
-            {"col": "gini", "label": r"Gini Coefficient", "cat": False, "trans": None},
+        "TFM_Comparative": [
+            {"col": "Z", "label": r"$\bm{z}$", "cat": False, "trans": None},
+            {"col": "sersic_sersic_vis_radius", "label": r"$\bm{\log R_{\mathrm{eff}}}$", "cat": False, "trans": log_transform},
+            {"col": "LOGSFR", "label": r"$\bm{\log \mathrm{SFR}}$", "cat": False, "trans": None},
+            {"col": "HALPHA_FLUX", "label": r"$\bm{\log F(\mathrm{H}\alpha)}$", "cat": False, "trans": log_transform},
         ]
     }
     
     row_modalities = [
-        ("EuclidImage", group_config["modalities"]["EuclidImage"]),
-        ("DESISpectrum", group_config["modalities"]["DESISpectrum"]),
+        ("Images", group_config["modalities"]["EuclidImage"]),
+        ("Spectra", group_config["modalities"]["DESISpectrum"]),
         ("Joint", group_config["modalities"]["Joint"])
     ]
     
-    def plot_single_set(set_name, plot_configs):
-        logger.info(f"Generating plot set: {set_name} for {group_name}...")
+    def plot_single_set(set_name, plot_configs, gray=False):
+        logger.info(f"Generating plot set: {set_name} (gray={gray}) for {group_name}...")
         
         # Compute Global Limits for Colorbars (only for this set)
         global_limits = {}
-        for config in plot_configs:
-            col = config["col"]
-            if not config["cat"] and col in df.columns:
-                vals = df[col].values.astype(float)
-                if config["trans"]: vals = config["trans"](vals)
-                valid_vals = vals[np.isfinite(vals)]
-                if len(valid_vals) > 0:
-                    global_limits[col] = (np.percentile(valid_vals, 1), np.percentile(valid_vals, 99))
+        if not gray:
+            for config in plot_configs:
+                col = config["col"]
+                if not config["cat"] and col in df.columns:
+                    vals = df[col].values.astype(float)
+                    if config["trans"]: vals = config["trans"](vals)
+                    valid_vals = vals[np.isfinite(vals)]
+                    if len(valid_vals) > 0:
+                        global_limits[col] = (np.percentile(valid_vals, 1), np.percentile(valid_vals, 99))
 
         n_rows = len(row_modalities)
         n_cols = len(plot_configs)
@@ -263,7 +247,7 @@ def plot_combined_standard_grid(
                 logger.warning(f"Modality key '{mod_key}' not found in UMAP storage. Skipping row.")
                 for ax in axes[row_idx]: 
                     ax.axis('off')
-                axes[row_idx, 0].set_ylabel(rf"\textbf{{{row_label}}}" + "\n" + r"\textbf{(N/A)}", fontsize=16, fontweight='bold')
+                axes[row_idx, 0].set_ylabel(rf"\textbf{{{row_label}}}" + "\n" + r"\textbf{(N/A)}", fontsize=24, fontweight='bold')
                 continue
                 
             umap_2d = umap_storage[mod_key]
@@ -288,34 +272,54 @@ def plot_combined_standard_grid(
                     for cat in sorted_cats:
                         cat_mask = df[col_name].astype(str) == cat
                         if np.sum(cat_mask) > 0:
-                            ax.scatter(umap_2d[cat_mask, 0], umap_2d[cat_mask, 1],
-                                       s=3, alpha=0.8, label=cat, c=CAT_PALETTE.get(cat, "#333333"), rasterized=True)
-                    if row_idx == n_rows - 1 and len(sorted_cats) < 8:
+                            if gray:
+                                ax.scatter(umap_2d[cat_mask, 0], umap_2d[cat_mask, 1],
+                                           s=3, alpha=0.35, c="#7f7f7f", rasterized=True)
+                            else:
+                                ax.scatter(umap_2d[cat_mask, 0], umap_2d[cat_mask, 1],
+                                           s=3, alpha=0.8, label=cat, c=CAT_PALETTE.get(cat, "#333333"), rasterized=True)
+                    if not gray and row_idx == n_rows - 1 and len(sorted_cats) < 8:
                         legend_els = [Line2D([0], [0], marker='o', color='w', label=c, markerfacecolor=CAT_PALETTE.get(c, "#333333"), markersize=10) for c in sorted_cats]
                         ax.legend(handles=legend_els, fontsize=14, loc='upper center', bbox_to_anchor=(0.5, 0.0), ncol=min(4, len(sorted_cats)), frameon=True)
                 else:
-                    vals = vals.astype(float)
-                    if config["trans"]: 
-                        vals = config["trans"](vals)
-                    vmin, vmax = global_limits.get(col_name, (0, 1))
-                    sc = ax.scatter(umap_2d[:, 0], umap_2d[:, 1], c=vals, cmap='turbo', s=1, alpha=0.4, vmin=vmin, vmax=vmax, rasterized=True)
-                    if row_idx == n_rows - 1:
-                        cbar = fig.colorbar(sc, cax=ax.inset_axes([0.025, -0.12, 0.95, 0.05]), orientation='horizontal')
-                        cbar.ax.tick_params(labelsize=14)
+                    if gray:
+                        ax.scatter(umap_2d[:, 0], umap_2d[:, 1], color='#7f7f7f', s=1.5, alpha=0.35, rasterized=True)
+                        if row_idx == n_rows - 1:
+                            from matplotlib.colors import ListedColormap, Normalize
+                            import matplotlib.cm as cm
+                            cmap_gray = ListedColormap(['#e0e0e0'])
+                            norm = Normalize(vmin=0, vmax=1)
+                            sc_fake = cm.ScalarMappable(norm=norm, cmap=cmap_gray)
+                            cbar = fig.colorbar(sc_fake, cax=ax.inset_axes([0.025, -0.12, 0.95, 0.05]), orientation='horizontal')
+                            cbar.set_ticks([])
+                    else:
+                        vals = vals.astype(float)
+                        if config["trans"]: 
+                            vals = config["trans"](vals)
+                        vmin, vmax = global_limits.get(col_name, (0, 1))
+                        sc = ax.scatter(umap_2d[:, 0], umap_2d[:, 1], c=vals, cmap='turbo', s=1, alpha=0.4, vmin=vmin, vmax=vmax, rasterized=True)
+                        if row_idx == n_rows - 1:
+                            cbar = fig.colorbar(sc, cax=ax.inset_axes([0.025, -0.12, 0.95, 0.05]), orientation='horizontal')
+                            cbar.locator = ticker.MaxNLocator(nbins=4)
+                            cbar.update_ticks()
+                            cbar.ax.tick_params(labelsize=18)
                 
                 ax.set_xlim(xlims)
                 ax.set_ylim(ylims)
                 ax.set_xticks([])
                 ax.set_yticks([])
                 if col_idx == 0: 
-                    ax.set_ylabel(rf"\textbf{{{row_label}}}" + "\n" + rf"\textbf{{(N={len(df)})}}", fontsize=18)
+                    ax.set_ylabel(rf"\textbf{{{row_label}}}", fontsize=24)
                 if row_idx == 0: 
-                    ax.set_title(rf"\boldmath\textbf{{{config['label']}}}", fontsize=20, pad=15)
+                    ax.set_title(rf"\boldmath\textbf{{{config['label']}}}", fontsize=24, pad=15)
+                for spine in ax.spines.values():
+                    spine.set_visible(True)
 
-        fig.suptitle(rf"\textbf{{AstroPT Latent Space - {group_config['title']} - {set_name}}}" + f"\n{suffix}", fontsize=24, y=1.05)
+        # Title and subtitle removed per user request
         
         # Save output using group prefix (e.g. umap_combined_phase1_morphology.png)
-        output_file = save_dir / f"{group_name}_{set_name.lower()}.png"
+        suffix_str = "_gray" if gray else ""
+        output_file = save_dir / f"{group_name}_{set_name.lower()}{suffix_str}.png"
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         plt.close()
         logger.info(f"Saved publication-quality comparative grid to: {output_file}")
@@ -324,7 +328,8 @@ def plot_combined_standard_grid(
     for s_name, s_config in CONFIGS.items():
         if target_set and s_name != target_set: 
             continue
-        plot_single_set(s_name, s_config)
+        plot_single_set(s_name, s_config, gray=False)
+        plot_single_set(s_name, s_config, gray=True)
 
 def make_rgb_lupton(rgb_array: np.ndarray) -> np.ndarray:
     """Applies Lupton stretch for RGB generation."""
@@ -509,34 +514,50 @@ def main():
     if args.plot_standard:
         logger.info("\n" + "="*40 + "\nPHASE 2A: COMBINED COMPARATIVE GRIDS\n" + "="*40)
         
-        PHASE_GROUPS = {
-            "umap_combined_phase1": {
-                "title": "Phase 1 (Isolated Unimodal Features)",
-                "modalities": {
-                    "EuclidImage": "EuclidImage_phase1",
-                    "DESISpectrum": "DESISpectrum_phase1",
-                    "Joint": "joint_phase1"
-                }
-            },
-            "umap_combined_phase2": {
-                "title": "Phase 2 (Contrastive Aligned Features)",
-                "modalities": {
-                    "EuclidImage": "EuclidImage_phase2",
-                    "DESISpectrum": "DESISpectrum_phase2",
-                    "Joint": "joint_phase2"
-                }
-            },
-            "umap_combined": {
+        # Detect keys dynamically from the loaded UMAP storage
+        euclid_key = next((k for k in umap_storage.keys() if 'euclid' in k.lower() or 'image' in k.lower()), None)
+        desi_key = next((k for k in umap_storage.keys() if 'desi' in k.lower() or 'spectrum' in k.lower() or 'spectra' in k.lower()), None)
+        joint_key = next((k for k in umap_storage.keys() if 'joint' in k.lower()), None)
+
+        PHASE_GROUPS = {}
+        if euclid_key or desi_key or joint_key:
+            PHASE_GROUPS["umap_combined"] = {
                 "title": "General/Combined (Pooled Sequence Features)",
                 "modalities": {
-                    "EuclidImage": "EuclidImage",
-                    "DESISpectrum": "DESISpectrum",
-                    "Joint": "joint"
+                    "EuclidImage": euclid_key or "EuclidImage",
+                    "DESISpectrum": desi_key or "DESISpectrum",
+                    "Joint": joint_key or "joint"
                 }
             }
-        }
+
+        # Also support phase 1 / phase 2 dynamically if present
+        euclid_p1 = next((k for k in umap_storage.keys() if ('euclid' in k.lower() or 'image' in k.lower()) and 'phase1' in k.lower()), None)
+        desi_p1 = next((k for k in umap_storage.keys() if ('desi' in k.lower() or 'spectrum' in k.lower() or 'spectra' in k.lower()) and 'phase1' in k.lower()), None)
+        joint_p1 = next((k for k in umap_storage.keys() if 'joint' in k.lower() and 'phase1' in k.lower()), None)
+        if euclid_p1 or desi_p1 or joint_p1:
+            PHASE_GROUPS["umap_combined_phase1"] = {
+                "title": "Phase 1 (Isolated Unimodal Features)",
+                "modalities": {
+                    "EuclidImage": euclid_p1 or "EuclidImage_phase1",
+                    "DESISpectrum": desi_p1 or "DESISpectrum_phase1",
+                    "Joint": joint_p1 or "joint_phase1"
+                }
+            }
+
+        euclid_p2 = next((k for k in umap_storage.keys() if ('euclid' in k.lower() or 'image' in k.lower()) and 'phase2' in k.lower()), None)
+        desi_p2 = next((k for k in umap_storage.keys() if ('desi' in k.lower() or 'spectrum' in k.lower() or 'spectra' in k.lower()) and 'phase2' in k.lower()), None)
+        joint_p2 = next((k for k in umap_storage.keys() if 'joint' in k.lower() and 'phase2' in k.lower()), None)
+        if euclid_p2 or desi_p2 or joint_p2:
+            PHASE_GROUPS["umap_combined_phase2"] = {
+                "title": "Phase 2 (Contrastive Aligned Features)",
+                "modalities": {
+                    "EuclidImage": euclid_p2 or "EuclidImage_phase2",
+                    "DESISpectrum": desi_p2 or "DESISpectrum_phase2",
+                    "Joint": joint_p2 or "joint_phase2"
+                }
+            }
         
-        ALL_SETS = ["Morphology", "Physics", "Chemistry"]
+        ALL_SETS = ["TFM_Comparative"]
         
         for group_name, group_config in PHASE_GROUPS.items():
             for set_name in ALL_SETS:
