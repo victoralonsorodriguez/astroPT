@@ -185,3 +185,4 @@ __pycache__/
 src/astropt/_version.py
 
 wandb/
+scratch/
