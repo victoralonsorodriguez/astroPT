@@ -16,18 +16,19 @@ set -euo pipefail
 
 # --- Defaults ---
 # Automatically detect the repository root
-if [ -n "$SLURM_SUBMIT_DIR" ]; then
+if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
     REPO_ROOT="$SLURM_SUBMIT_DIR"
 else
     REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 fi
-INTERP_SCRIPT="/home/valonso/iac18_mhuertas_shared/valonso/astroPT/scripts/arrow_dataset_interpolation.py"
-VIEWER_SCRIPT="/home/valonso/iac18_mhuertas_shared/valonso/astroPT/scripts/arrow_dataset_interpolation_viewer.py"
+
+INTERP_SCRIPT="$REPO_ROOT/scripts/preprocessing/arrow_dataset_interpolation.py"
+VIEWER_SCRIPT="$REPO_ROOT/scripts/legacy/arrow_dataset_interpolation_viewer.py"
 
 DATA_DIR_ORIGINAL="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_filter_corrupt"
 DATA_DIR_INTERP="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated"
 METADATA_PATH="/home/valonso/iac18_aasensio_shared/euclid_dr1/catalog/catalog_MER_DR1_DESI_DR1_combined_wide_deep_v1.1.fits"
-VIEWER_SAVE_DIR="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated_stamps"
+VIEWER_SAVE_DIR=""
 
 SPLIT="all"
 NUM_WORKERS=8
@@ -42,12 +43,13 @@ WL_MAX=""
 # If invoked as: sbatch script.sh -- -m ...
 if [[ "${1:-}" == "--" ]]; then
   shift
+fi
 
 usage() {
   cat <<EOF
 Usage:
-  sbatch slurm/arrow_dataset_interpolation_pipeline.sh -- [options]
-  bash slurm/arrow_dataset_interpolation_pipeline.sh [options]
+  sbatch slurm/preprocessing/arrow_dataset_interpolation_pipeline.sh -- [options]
+  bash slurm/preprocessing/arrow_dataset_interpolation_pipeline.sh [options]
 
 Required:
   -m <metadata_path>            FITS metadata catalog path
@@ -70,6 +72,7 @@ EOF
 
 while getopts ":r:i:o:m:v:p:n:k:c:q:x:y:h" opt; do
   case $opt in
+    r) REPO_ROOT="$OPTARG" ;;
     i) DATA_DIR_ORIGINAL="$OPTARG" ;;
     o) DATA_DIR_INTERP="$OPTARG" ;;
     m) METADATA_PATH="$OPTARG" ;;
@@ -102,16 +105,19 @@ if [[ -z "$METADATA_PATH" ]]; then
   echo "[ERROR] Missing required -m <metadata_path>" >&2
   usage
   exit 1
+fi
 
 DATA_DIR_ORIGINAL=$(readlink -f "$DATA_DIR_ORIGINAL")
 DATA_DIR_INTERP=$(readlink -f "$DATA_DIR_INTERP")
 METADATA_PATH=$(readlink -f "$METADATA_PATH")
 
-export HF_DATASETS_CACHE="/home/valonso/iac18_mhuertas_shared/valonso/cache/huggingface/datasets"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/home/valonso/iac18_mhuertas_shared/valonso/cache/huggingface/datasets}"
 
 if [[ -z "$VIEWER_SAVE_DIR" ]]; then
   VIEWER_SAVE_DIR="${REPO_ROOT}/logs/interpolation_viewer_$(date +%Y%m%d_%H%M%S)"
-VIEWER_SAVE_DIR=$(readlink -m "$VIEWER_SAVE_DIR")
+fi
+mkdir -p "$VIEWER_SAVE_DIR"
+VIEWER_SAVE_DIR=$(readlink -f "$VIEWER_SAVE_DIR")
 
 NOW=$(date "+[%Y-%m-%d - %H:%M:%S]")
 echo "-----------------------------------------------"
@@ -122,7 +128,9 @@ echo "[1/6] Changing directory to repo: ${REPO_ROOT}"
 cd "$REPO_ROOT"
 
 echo "[2/6] Activating Python environment"
-source "$REPO_ROOT/.venv/bin/activate""
+if [ -f "$REPO_ROOT/.venv/bin/activate" ]; then
+    source "$REPO_ROOT/.venv/bin/activate"
+fi
 
 echo "[3/6] Running interpolation"
 echo "      Original dataset:   ${DATA_DIR_ORIGINAL}"
@@ -140,25 +148,30 @@ python "$INTERP_SCRIPT" \
   --num_workers "$NUM_WORKERS" \
   --re_multiplier "$RE_MULTIPLIER"
 
-echo "[4/6] Interpolation done"
+echo "[4/6] Interpolation completed successfully"
 
-echo "[5/6] Running interpolation viewer"
-echo "      Viewer save dir:    ${VIEWER_SAVE_DIR}"
-echo "      Viewer split:       ${SPLIT}"
+if [ -f "$VIEWER_SCRIPT" ]; then
+    echo "[5/6] Running interpolation viewer"
+    echo "      Viewer save dir:    ${VIEWER_SAVE_DIR}"
+    echo "      Viewer split:       ${SPLIT}"
 
-VIEWER_CMD=(
-  python "$VIEWER_SCRIPT"
-  --data_dir_original "$DATA_DIR_ORIGINAL"
-  --data_dir_interpolated "$DATA_DIR_INTERP"
-  --save_dir "$VIEWER_SAVE_DIR"
-  --split "$SPLIT"
-)
+    VIEWER_CMD=(
+      python "$VIEWER_SCRIPT"
+      --data_dir_original "$DATA_DIR_ORIGINAL"
+      --data_dir_interpolated "$DATA_DIR_INTERP"
+      --save_dir "$VIEWER_SAVE_DIR"
+      --split "$SPLIT"
+    )
 
-if [[ -n "$WL_MIN" && -n "$WL_MAX" ]]; then
-  VIEWER_CMD+=(--wl_range "$WL_MIN" "$WL_MAX")
+    if [[ -n "$WL_MIN" && -n "$WL_MAX" ]]; then
+      VIEWER_CMD+=(--wl_range "$WL_MIN" "$WL_MAX")
+    fi
 
-"${VIEWER_CMD[@]}"
+    "${VIEWER_CMD[@]}"
+else
+    echo "[5/6] Viewer script not found at ${VIEWER_SCRIPT}, skipping visual sanity inspect."
+fi
 
 echo "[6/6] Pipeline finished successfully"
-echo "      Plots saved in: ${VIEWER_SAVE_DIR}"
+echo "      Output dataset: ${DATA_DIR_INTERP}"
 echo "-----------------------------------------------"
