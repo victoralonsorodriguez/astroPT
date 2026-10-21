@@ -6,7 +6,7 @@ echo "Launching AstroCLIP Pipeline (Train + Post-Analysis)"
 echo "-------------------------------------------------"
 
 # Robust repository root detection based on script location
-# (Script is in slurm/legacy/, so REPO_ROOT is two levels up)
+# (Script is in slurm/baselines/, so REPO_ROOT is two levels up)
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 
@@ -22,9 +22,9 @@ META_PATH="/home/valonso/iac18_aasensio_shared/euclid_dr1/catalog/catalog_MER_DR
 # --------------------------
 
 # LAUNCHING SCRIPTS
-TRAIN_SCRIPT="$SCRIPT_DIR/train_astroclip_multiGPU.sh"
+TRAIN_SCRIPT="$SCRIPT_DIR/baseline_astroclip_train.sh"
 PLOT_MET_SCRIPT="$REPO_ROOT/slurm/analysis/dash_training_metrics.sh"
-EXT_EMBD_SCRIPT="$REPO_ROOT/slurm/legacy/extract_embeddings_astroclip.sh"
+EXT_EMBD_SCRIPT="$SCRIPT_DIR/baseline_astroclip_embeddings.sh"
 COS_SIM_SCRIPT="$REPO_ROOT/slurm/analysis/dash_embeddings_alignment.sh"
 UMAPS_SCRIPT="$REPO_ROOT/slurm/analysis/dash_latent_projection.sh"
 PROBING_SCRIPT="$REPO_ROOT/slurm/probing/probing_downstream_benchmark.sh"

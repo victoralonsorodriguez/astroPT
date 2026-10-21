@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # Robust repository root detection based on script location
-# (Script is in slurm/legacy/, so REPO_ROOT is two levels up)
+# (Script is in slurm/baselines/, so REPO_ROOT is two levels up)
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 
@@ -27,7 +27,7 @@ if [[ "$REPO_ROOT" == "/var/spool"* ]]; then
     REPO_ROOT="$PWD"
 fi
 
-PYTHON_SCRIPT="$REPO_ROOT/scripts/legacy/extract_embeddings_astroclip.py"
+PYTHON_SCRIPT="$REPO_ROOT/scripts/baselines/baseline_astroclip_embeddings.py"
 DATA_DIR="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated"
 EXP_TAG=""
 
@@ -76,7 +76,11 @@ echo "-----------------------------------------------"
 echo "Changing directory to: $REPO_ROOT"
 cd "$REPO_ROOT" || { echo "[ERROR]: Cannot find REPO_ROOT: $REPO_ROOT"; exit 1; }
 
-source "$REPO_ROOT/.venv/bin/activate"
+if [ -d "$REPO_ROOT/.venv" ]; then
+    source "$REPO_ROOT/.venv/bin/activate"
+elif [ -d "$REPO_ROOT/venv" ]; then
+    source "$REPO_ROOT/venv/bin/activate"
+fi
 
 export UV_CACHE_DIR="$REPO_ROOT/../cache/uv_cache"
 export HF_HOME="$REPO_ROOT/../cache/huggingface"

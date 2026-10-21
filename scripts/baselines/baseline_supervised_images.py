@@ -1,16 +1,18 @@
+#!/usr/bin/env python3
 """
-AstroPT Supervised Baseline (ResNet18).
-
-This script trains a ResNet18 from scratch using the AstroPT dataset
-to predict specific downstream properties directly from images.
-It serves as a strong supervised baseline to compare against zero/few-shot probing.
-
-Features:
-- Modifies ResNet18 conv1 to accept 4 channels (VIS, Y, J, H).
-- Modifies fc to output the required dimension.
-- Uses EuclidDESIDatasetArrow (without spiral) and un-patchifies for 2D convolutions.
-- AstroPT Architecture: Infinite iterations, Checkpoints, Logging, Cosine LR, config.json.
+AstroPT-MM Baseline: Supervised ResNet18 for Euclid Images
+============================================================
+Author: Victor Alonso Rodriguez
+Date: October 2026
+Description:
+    Trains a 4-channel ResNet18 (VIS, Y, J, H) from scratch on Euclid imagery
+    from the processed AstroPT Arrow dataset to predict downstream physical and
+    morphological galaxy properties (e.g., redshift, stellar mass, sersic index).
+    Serves as the primary supervised visual baseline to benchmark foundation
+    representations learned by AstroPT-MM.
 """
+
+from __future__ import annotations
 
 import logging
 import sys
@@ -33,6 +35,11 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from torchvision.models import resnet18
 
+# Ensure repo root src is on sys.path
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+
 from astropt.dataloader_multimodal import MultimodalDatasetArrow
 from astropt.processors import EuclidImageProcessor
 from astropt.model import ModalityRegistry, ModalityConfig
@@ -43,7 +50,7 @@ from sklearn.metrics import r2_score, mean_squared_error, accuracy_score, f1_sco
 from astropy.table import Table
 import warnings
 from astropy.utils.exceptions import AstropyWarning
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Optional, List, Tuple, Any, Dict
 from transformers import HfArgumentParser
 
@@ -56,48 +63,144 @@ class TrainingConfig:
     Aligned with AstroPT TrainingConfig where applicable.
     """
     #--- Metadata & Paths ---#
-    target: str = "Z"                                      # Target column in catalog
-    train_name: str = "resnet_baseline"                    # Name for the run
-    train_date: Optional[str] = None                       # Date of the training
-    train_dir: Optional[str] = None                        # Training output directory
-    seed: int = 61                                         # Random seed
-    metadata_path: str = "/home/valonso/iac18_aasensio_shared/euclid_dr1/catalog/catalog_MER_DR1_DESI_DR1_combined_wide_deep_v1.1_FILTERED.fits"
-    data_dir: str = "/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated"
+    target: str = field(
+        default="Z", 
+        metadata={"help": "Target column to predict from catalog (e.g. Z, phz_pp_median_redshift, LOGMSTAR, etc.)"}
+    )
+    train_name: str = field(
+        default="resnet_baseline", 
+        metadata={"help": "Experiment name identifier"}
+    )
+    train_date: Optional[str] = field(
+        default=None, 
+        metadata={"help": "Execution date in YYYYMMDD format"}
+    )
+    train_dir: Optional[str] = field(
+        default=None, 
+        metadata={"help": "Output directory where logs and weights are saved"}
+    )
+    seed: int = field(
+        default=61, 
+        metadata={"help": "Random seed for reproducibility"}
+    )
+    metadata_path: str = field(
+        default="/home/valonso/iac18_aasensio_shared/euclid_dr1/catalog/catalog_MER_DR1_DESI_DR1_combined_wide_deep_v1.1_FILTERED.fits",
+        metadata={"help": "Path to the FITS catalog containing target labels"}
+    )
+    data_dir: str = field(
+        default="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated",
+        metadata={"help": "Path to the processed Arrow dataset directory"}
+    )
     
     #--- Data Loading ---#
-    batch_size: int = 128                                  # Batch size
-    num_workers: int = 4                                   # DataLoader workers
-    spiral: bool = False                                   # ResNet needs 2D raster order
+    batch_size: int = field(
+        default=128, 
+        metadata={"help": "Batch size for training and evaluation"}
+    )
+    num_workers: int = field(
+        default=4, 
+        metadata={"help": "Number of DataLoader worker processes"}
+    )
+    spiral: bool = field(
+        default=False, 
+        metadata={"help": "Whether to patchify in spiral order (False for standard 2D raster)"}
+    )
     
     #--- Hyperparameters (AstroPT Aligned) ---#
-    max_iters: int = 75000                                  # Total training iters
-    init_from: str = "scratch"                             # "scratch" or "resume"
-    learning_rate: float = 3e-4                            # Max Learning rate
-    lr_min: float = 3e-5                                   # Min Learning rate
-    lr_warmup_iters: int = 5000                            # Warmup steps
-    lr_decay_iters: int = 70000                            # Decay steps
-    weight_decay: float = 0.1                              # Weight decay
-    beta1: float = 0.9                                     # AdamW parameter
-    beta2: float = 0.98                                    # AdamW parameter
+    max_iters: int = field(
+        default=75000, 
+        metadata={"help": "Total training iterations"}
+    )
+    init_from: str = field(
+        default="scratch", 
+        metadata={"help": "Initialization mode: 'scratch' or 'resume' from checkpoint"}
+    )
+    learning_rate: float = field(
+        default=3e-4, 
+        metadata={"help": "Peak learning rate"}
+    )
+    lr_min: float = field(
+        default=3e-5, 
+        metadata={"help": "Minimum learning rate after decay"}
+    )
+    lr_warmup_iters: int = field(
+        default=5000, 
+        metadata={"help": "Number of linear warmup iterations for learning rate"}
+    )
+    lr_decay_iters: int = field(
+        default=70000, 
+        metadata={"help": "Number of cosine decay iterations for learning rate"}
+    )
+    weight_decay: float = field(
+        default=0.1, 
+        metadata={"help": "AdamW weight decay coefficient"}
+    )
+    beta1: float = field(
+        default=0.9, 
+        metadata={"help": "AdamW beta1 hyperparameter"}
+    )
+    beta2: float = field(
+        default=0.98, 
+        metadata={"help": "AdamW beta2 hyperparameter"}
+    )
     
     #--- Image Processing ---#
-    images_channels: int = 4                               # VIS + Y, J, H
-    images_patch_size: int = 8                             # Patch size (AstroPT uses 8)
-    images_norm_type: str = "asinh"                        # Normalization method
-    images_norm_scaler: float = 1.0
-    images_norm_const: float = 1.0
-    use_aug: bool = True                                   # Use data augmentation
+    images_channels: int = field(
+        default=4, 
+        metadata={"help": "Number of image channels (VIS, Y, J, H)"}
+    )
+    images_patch_size: int = field(
+        default=8, 
+        metadata={"help": "Patch size used in tokenization (unpatchified to 2D image)"}
+    )
+    images_norm_type: str = field(
+        default="asinh", 
+        metadata={"help": "Normalization type for images ('asinh', 'minmax', 'zscore')"}
+    )
+    images_norm_scaler: float = field(
+        default=1.0, 
+        metadata={"help": "Normalization scaler parameter"}
+    )
+    images_norm_const: float = field(
+        default=1.0, 
+        metadata={"help": "Normalization constant parameter"}
+    )
+    use_aug: bool = field(
+        default=True, 
+        metadata={"help": "Apply random flips/rotations data augmentation"}
+    )
     
     #--- Logging & Checkpointing ---#
-    eval_interval: int = 1000                               # How often to evaluate
-    eval_batches: int = 200                                 # How many batches for evaluation
-    log_interval: int = 200                                 # Console/CSV log interval
-    checkpoint_interval: int = 1000                         # How often to save model weights
-    early_stop_patience: int = 15                           # Limits iterations without validation loss improvement
-    early_stopping_min_iters: int = 50000                   # Minimum iterations before starting to count patience
+    eval_interval: int = field(
+        default=1000, 
+        metadata={"help": "Interval (in iterations) between evaluations"}
+    )
+    eval_batches: int = field(
+        default=200, 
+        metadata={"help": "Number of batches to evaluate on validation set"}
+    )
+    log_interval: int = field(
+        default=200, 
+        metadata={"help": "Interval (in iterations) between console log prints"}
+    )
+    checkpoint_interval: int = field(
+        default=1000, 
+        metadata={"help": "Interval (in iterations) between saving checkpoints"}
+    )
+    early_stop_patience: int = field(
+        default=15, 
+        metadata={"help": "Patience checks without validation improvement before early stopping"}
+    )
+    early_stopping_min_iters: int = field(
+        default=50000, 
+        metadata={"help": "Minimum training iterations before early stopping can trigger"}
+    )
     
     #--- System ---#
-    max_run_hours: Optional[str] = None                    # Time limit ("HH:MM:SS")
+    max_run_hours: Optional[str] = field(
+        default=None, 
+        metadata={"help": "Maximum execution time in 'HH:MM:SS' format"}
+    )
     
     def __post_init__(self):
         if self.train_date is None:

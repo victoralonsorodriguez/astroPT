@@ -1,10 +1,15 @@
+#!/usr/bin/env python3
 """
-AstroCLIP training on AstroPT Arrow data with AstroPT-like logging.
-
-Goals:
-- Reuse AstroPT Arrow dataloader.
-- Keep training/validation outputs as comparable as possible to AstroPT logs.
-- Run DDP with 4 GPUs by default.
+AstroPT-MM Baseline: AstroCLIP Multi-GPU Training on Arrow Data
+================================================================
+Author: Victor Alonso Rodriguez
+Date: October 2026
+Description:
+    Trains AstroCLIP from scratch on the processed multimodal Euclid VIS+NISP
+    and DESI spectra Arrow dataset using PyTorch Lightning and Distributed Data
+    Parallel (DDP). Aligns visual and spectroscopic galaxy representations via
+    contrastive InfoNCE loss with AstroPT-compatible logging, checkpoints, and
+    reproducibility metadata for downstream astronomical benchmarking.
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -33,12 +38,13 @@ from torch.utils.data import DataLoader
 from torchvision.transforms import CenterCrop
 from transformers import HfArgumentParser
 
-# Assuming this script is executed from astroPT/scripts/legacy
-ASTROPT_DIR = Path(__file__).resolve().parent.parent.parent
-ASTROCLIP_DIR = ASTROPT_DIR.parent / "AstroCLIP"
+# Local repository paths
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+ASTROPT_DIR = REPO_ROOT
+ASTROCLIP_DIR = REPO_ROOT.parent / "AstroCLIP"
 
-if str(ASTROPT_DIR / "src") not in sys.path:
-    sys.path.append(str(ASTROPT_DIR / "src"))
+if str(REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
 if str(ASTROCLIP_DIR) not in sys.path:
     sys.path.append(str(ASTROCLIP_DIR))
 
@@ -59,78 +65,216 @@ class AstroCLIPArrowConfig:
     """
 
     #--- Training Metadata ---#
-    train_name: Optional[str] = "astroclip_arrow"
-    train_date: Optional[str] = None
-    train_description: Optional[str] = None
+    train_name: Optional[str] = field(
+        default="astroclip_arrow",
+        metadata={"help": "Experiment run name for logs and directory naming"}
+    )
+    train_date: Optional[str] = field(
+        default=None,
+        metadata={"help": "Training date in YYYYMMDD format"}
+    )
+    train_description: Optional[str] = field(
+        default=None,
+        metadata={"help": "Detailed description of the training run"}
+    )
 
     #--- I/O & Paths ---#
-    train_dir: Optional[str] = None
-    data_dir: str = "/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated"
+    train_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "Output directory for weights, logs and metrics"}
+    )
+    data_dir: str = field(
+        default="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated",
+        metadata={"help": "Root path to processed Arrow dataset directory"}
+    )
 
     #--- Data Loading ---#
-    batch_size: int = 16
-    num_workers: int = 8
-    persistent_workers: bool = True
-    prefetch_factor: int = 2
-    pin_memory: bool = True
-    init_from: str = "scratch"      # Training from scratch or resume training
+    batch_size: int = field(
+        default=16,
+        metadata={"help": "Per-GPU micro-batch size"}
+    )
+    num_workers: int = field(
+        default=8,
+        metadata={"help": "Number of DataLoader workers per GPU"}
+    )
+    persistent_workers: bool = field(
+        default=True,
+        metadata={"help": "Keep worker processes alive between epochs"}
+    )
+    prefetch_factor: int = field(
+        default=2,
+        metadata={"help": "Batches to prefetch per worker"}
+    )
+    pin_memory: bool = field(
+        default=True,
+        metadata={"help": "Pin memory for faster host-to-device transfer"}
+    )
+    init_from: str = field(
+        default="scratch",
+        metadata={"help": "Initialization mode: 'scratch' or 'resume'"}
+    )
 
     #--- Model Architecture ---#
-    seed: int = 61
+    seed: int = field(
+        default=61,
+        metadata={"help": "Random seed for reproducibility"}
+    )
 
     # Images
-    images_size: int = 224
-    images_patch_size: int = 8
-    images_channels: int = 4
+    images_size: int = field(
+        default=224,
+        metadata={"help": "Input image resolution in pixels"}
+    )
+    images_patch_size: int = field(
+        default=8,
+        metadata={"help": "Spatial patch size for visual backbone"}
+    )
+    images_channels: int = field(
+        default=4,
+        metadata={"help": "Number of Euclid image channels (VIS, Y, J, H)"}
+    )
 
     # Spectra
-    spectra_patch_size: int = 10
+    spectra_patch_size: int = field(
+        default=10,
+        metadata={"help": "Patch size for 1D DESI spectra"}
+    )
 
     # AstroCLIP-specific image preprocessing
-    center_crop: int = 144
+    center_crop: int = field(
+        default=144,
+        metadata={"help": "Center crop size applied before resizing"}
+    )
 
     #--- Optimization of the Learning Process ---#
-    max_iters: int = 75_000
-    max_epochs: int = 100
-    weight_decay: float = 1e-1
-    beta1: float = 0.9
-    beta2: float = 0.98
-    grad_clip: float = 2.0
-    gradient_accumulation_steps: int = 40
+    max_iters: int = field(
+        default=75_000,
+        metadata={"help": "Maximum optimizer steps"}
+    )
+    max_epochs: int = field(
+        default=100,
+        metadata={"help": "Maximum training epochs"}
+    )
+    weight_decay: float = field(
+        default=1e-1,
+        metadata={"help": "Weight decay coefficient for AdamW"}
+    )
+    beta1: float = field(
+        default=0.9,
+        metadata={"help": "AdamW beta1 parameter"}
+    )
+    beta2: float = field(
+        default=0.98,
+        metadata={"help": "AdamW beta2 parameter"}
+    )
+    grad_clip: float = field(
+        default=2.0,
+        metadata={"help": "Maximum gradient norm clipping threshold"}
+    )
+    gradient_accumulation_steps: int = field(
+        default=40,
+        metadata={"help": "Gradient accumulation steps before optimizer step"}
+    )
 
     #--- Learning Rate Scheduler ---#
-    learning_rate: float = 3e-4
-    lr_min: float = 3e-5
-    lr_warmup_steps: int = 5_000
-    lr_decay_steps: int = 70_000
-    max_steps: int = -1
+    learning_rate: float = field(
+        default=3e-4,
+        metadata={"help": "Peak learning rate"}
+    )
+    lr_min: float = field(
+        default=3e-5,
+        metadata={"help": "Minimum learning rate after cosine decay"}
+    )
+    lr_warmup_steps: int = field(
+        default=5_000,
+        metadata={"help": "Linear warmup steps"}
+    )
+    lr_decay_steps: int = field(
+        default=70_000,
+        metadata={"help": "Cosine decay steps"}
+    )
+    max_steps: int = field(
+        default=-1,
+        metadata={"help": "Override max steps (-1 to deduce from max_iters)"}
+    )
 
     #--- Logging & Checkpointing ---#
-    val_check_interval: int = 1000
-    limit_val_batches: int = 200
-    log_interval: int = 200
-    checkpoint_interval: int = 1_000
-    checkpoint_save_type: str = "both"      # best, last, both or all
-    early_stopping_patience: int = 15
-    early_stopping_min_iters: int = 50_000
+    val_check_interval: int = field(
+        default=1000,
+        metadata={"help": "Step interval between validation runs"}
+    )
+    limit_val_batches: int = field(
+        default=200,
+        metadata={"help": "Batches evaluated during validation"}
+    )
+    log_interval: int = field(
+        default=200,
+        metadata={"help": "Step interval between console and CSV logs"}
+    )
+    checkpoint_interval: int = field(
+        default=1_000,
+        metadata={"help": "Step interval between checkpoint saves"}
+    )
+    checkpoint_save_type: str = field(
+        default="both",
+        metadata={"help": "Checkpoints to retain: 'best', 'last', 'both' or 'all'"}
+    )
+    early_stopping_patience: int = field(
+        default=15,
+        metadata={"help": "Validation checks without improvement before early stopping"}
+    )
+    early_stopping_min_iters: int = field(
+        default=50_000,
+        metadata={"help": "Minimum steps before early stopping can trigger"}
+    )
 
     #--- System & Backend ---#
-    precision: str = "bf16-mixed"
-    max_run_hours: Optional[str] = None     # Force stop after "HH:MM:SS"
+    precision: str = field(
+        default="bf16-mixed",
+        metadata={"help": "Numerical precision (e.g. 'bf16-mixed', '16-mixed', '32')"}
+    )
+    max_run_hours: Optional[str] = field(
+        default=None,
+        metadata={"help": "Force checkpoint and graceful stop after 'HH:MM:SS'"}
+    )
 
     #--- External Monitoring ---#
-    log_via_wandb: bool = False
-    wandb_project: str = "astroclip-alignment"
-    wandb_entity: Optional[str] = None
+    log_via_wandb: bool = field(
+        default=False,
+        metadata={"help": "Enable Weights & Biases logging"}
+    )
+    wandb_project: str = field(
+        default="astroclip-alignment",
+        metadata={"help": "W&B project name"}
+    )
+    wandb_entity: Optional[str] = field(
+        default=None,
+        metadata={"help": "W&B entity name"}
+    )
 
     #--- DDP ---#
-    ddp_num_gpus: int = 4
-    ddp_strategy: str = "ddp"
-    ddp_find_unused_parameters: bool = True
+    ddp_num_gpus: int = field(
+        default=4,
+        metadata={"help": "Number of GPUs for distributed data parallel"}
+    )
+    ddp_strategy: str = field(
+        default="ddp",
+        metadata={"help": "PyTorch Lightning distributed strategy"}
+    )
+    ddp_find_unused_parameters: bool = field(
+        default=True,
+        metadata={"help": "DDP find_unused_parameters flag"}
+    )
 
     #--- AstroCLIP encoder tuning ---#
-    freeze_image_backbone: bool = False
-    freeze_spectrum_backbone: bool = True
+    freeze_image_backbone: bool = field(
+        default=False,
+        metadata={"help": "Freeze image transformer backbone during training"}
+    )
+    freeze_spectrum_backbone: bool = field(
+        default=True,
+        metadata={"help": "Freeze spectrum transformer backbone during training"}
+    )
 
     def __post_init__(self):
         if self.train_date is None:

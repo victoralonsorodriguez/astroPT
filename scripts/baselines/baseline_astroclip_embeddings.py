@@ -1,14 +1,14 @@
+#!/usr/bin/env python3
 """
-AstroCLIP embedding extractor compatible with AstroPT downstream analysis scripts.
-
-Outputs in embedding folder:
-- ids.npy
-- targetid.npy
-- images.npy
-- spectra.npy
-- joint.npy
-- embeddings_all.npz
-- experiment_config.json
+AstroPT-MM Baseline: AstroCLIP Multimodal Embedding Extractor
+==============================================================
+Author: Victor Alonso Rodriguez
+Date: October 2026
+Description:
+    Extracts multimodal (Euclid images, DESI spectra, and joint) cross-modal
+    embeddings from fine-tuned AstroCLIP model checkpoints evaluated on the
+    AstroPT processed Arrow dataset. Saves aligned .npy arrays and .npz archives
+    compatible with the AstroPT-MM downstream probing and representation analysis suite.
 """
 
 from __future__ import annotations
@@ -46,8 +46,7 @@ from astropt.dataloader_multimodal import MultimodalDatasetArrow
 from astropt.processors import EuclidImageProcessor, DESISpectrumProcessor
 from astropt.model import ModalityConfig, ModalityRegistry
 
-from astroclip.models.astroclip import ImageHead, SpectrumHead
-import train_astroclip_arrow as train_mod
+from astroclip.models.astroclip import AstroClipModel, ImageHead, SpectrumHead
 
 logging.basicConfig(
     format="[%(asctime)s] [%(levelname)s] %(message)s",
@@ -56,6 +55,37 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 logger = logging.getLogger("AstroCLIP-Extractor")
+
+
+class AstroClipTrainModule(AstroClipModel):
+    """PyTorch Lightning wrapper around AstroClipModel to allow checkpoint loading."""
+    def __init__(
+        self,
+        image_encoder,
+        spectrum_encoder,
+        temperature: float = 15.5,
+        lr: float = 1e-4,
+        weight_decay: float = 0.05,
+        epochs: int = 100,
+        eta_min: float = 5e-7,
+        beta1: float = 0.9,
+        beta2: float = 0.95,
+        lr_warmup_steps: int = 1000,
+        lr_decay_steps: int = 10000,
+    ):
+        super().__init__(
+            image_encoder=image_encoder,
+            spectrum_encoder=spectrum_encoder,
+            temperature=temperature,
+            lr=lr,
+            weight_decay=weight_decay,
+            epochs=epochs,
+            eta_min=eta_min,
+        )
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.lr_warmup_steps = lr_warmup_steps
+        self.lr_decay_steps = lr_decay_steps
 
 
 def parse_args() -> argparse.Namespace:
@@ -169,7 +199,7 @@ class CollateForAstroCLIP:
         }
 
 
-def build_model(config_dict: Dict, train_dir: Path) -> train_mod.AstroClipTrainModule:
+def build_model(config_dict: Dict, train_dir: Path) -> AstroClipTrainModule:
     root = os.environ.get("ASTROCLIP_ROOT", str(ASTROCLIP_ROOT))
 
     image_encoder = ImageHead(
@@ -184,7 +214,7 @@ def build_model(config_dict: Dict, train_dir: Path) -> train_mod.AstroClipTrainM
         freeze_backbone=bool(config_dict.get("freeze_spectrum_backbone", True)),
     )
 
-    model = train_mod.AstroClipTrainModule(
+    model = AstroClipTrainModule(
         image_encoder=image_encoder,
         spectrum_encoder=spectrum_encoder,
         temperature=15.5,

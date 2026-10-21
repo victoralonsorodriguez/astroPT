@@ -2,11 +2,14 @@
 
 set -euo pipefail
 
-# Environment Configuration
-export REPO_ROOT="/home/valonso/iac18_mhuertas_shared/valonso/astroPT"
+# Robust repository root detection based on script location
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=${REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}
+
+export REPO_ROOT
 export DATA_DIR="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated"
-export UV_CACHE_DIR="/home/valonso/iac18_mhuertas_shared/valonso/cache/uv_cache"
-export HF_HOME="/home/valonso/iac18_mhuertas_shared/valonso/cache/huggingface"
+export UV_CACHE_DIR="$REPO_ROOT/../cache/uv_cache"
+export HF_HOME="$REPO_ROOT/../cache/huggingface"
 export OMP_NUM_THREADS=4
 
 # Test defaults
@@ -41,7 +44,11 @@ while getopts "n:d:a:s:b:w:m:th" opt; do
 done
 
 cd "$REPO_ROOT" || { echo "[ERROR] Cannot enter REPO_ROOT: $REPO_ROOT"; exit 1; }
-source "$REPO_ROOT/.venv/bin/activate"
+if [ -d "$REPO_ROOT/.venv" ]; then
+    source "$REPO_ROOT/.venv/bin/activate"
+elif [ -d "$REPO_ROOT/venv" ]; then
+    source "$REPO_ROOT/venv/bin/activate"
+fi
 
 echo "Running AstroCLIP dependency test: $T_NAME"
 echo "  DATA_DIR:     $DATA_DIR"
@@ -115,7 +122,7 @@ RUN_TAG=$(date +%Y%m%d_%H%M%S)
 TRAIN_DIR="$REPO_ROOT/logs/astroclip_depcheck_${RUN_TAG}"
 
 echo "[Run] Starting tiny AstroCLIP train in: $TRAIN_DIR"
-python scripts/legacy/train_astroclip_arrow.py \
+python "$REPO_ROOT/scripts/baselines/baseline_astroclip_train.py" \
     --data_dir "$DATA_DIR" \
     --train_dir "$TRAIN_DIR" \
     --train_name "$T_NAME" \

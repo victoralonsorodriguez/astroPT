@@ -1,17 +1,15 @@
+#!/usr/bin/env python3
 """
-AION Frozen Embedding Extractor.
-
-Features:
-- Loads the frozen `aion-base` model from Hugging Face.
-- Uses `EuclidDESIDatasetArrow` to read and tokenize on the fly:
-  - Mapped Euclid to HSC space and tokenized as "tok_image_hsc".
-  - Tokenized DESI spectra as "tok_spectrum_desi".
-- Performs isolated passes for imagery and spectra, and a combined joint pass.
-- Employs Numpy Memmap to write directly to disk with minimal RAM overhead.
-- Packages output in format compatible with probing_downstream_benchmark.py.
-
-Author: Victor Alonso Rodriguez / Antigravity
-Date: May 2026
+AstroPT-MM Baseline: AION Frozen Embedding Extractor
+=======================================================
+Author: Victor Alonso Rodriguez
+Date: October 2026
+Description:
+    Extracts frozen foundation model embeddings from AION (polymathic-ai/aion-base)
+    on the AstroPT multimodal Euclid+DESI Arrow dataset. Performs isolated passes
+    for Euclid imagery and DESI spectra, as well as a joint multimodal pass. Employs
+    NumPy memory-mapping to stream outputs directly to disk (.npy and .npz) for downstream
+    probing benchmarks without RAM bottlenecks.
 """
 
 from __future__ import annotations
@@ -29,6 +27,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from typing import Dict, List, Tuple, Optional, Any
 from contextlib import nullcontext
+
+# Ensure repo root src is on sys.path
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from astropt.model import ModalityConfig, ModalityRegistry
 from astropt.legacy.euclid_desi_arrow_dataloader import EuclidDESIDatasetArrow

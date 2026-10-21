@@ -1,13 +1,18 @@
+#!/usr/bin/env python3
 """
-Spectra Supervised Baseline Training Script.
-
-This script implements a supervised training pipeline for the SpectraSupervisedBaseline
-model, designed for 1D DESI spectra regression tasks. This model serves as a 
-supervised benchmark against foundation models like AstroPT.
-
-Author: Antigravity (Senior ML Engineer)
-Date: May 2026
+AstroPT-MM Baseline: Supervised 1D Conv+Transformer for DESI Spectra
+=====================================================================
+Author: Victor Alonso Rodriguez
+Date: October 2026
+Description:
+    Trains a 1D Convolutional Stem + Transformer Encoder from scratch on 1D DESI
+    spectra from the processed AstroPT Arrow dataset to predict downstream physical
+    and chemical galaxy properties (e.g., redshift, stellar mass, emission line fluxes).
+    Serves as the primary supervised spectroscopic baseline to benchmark foundation
+    representations learned by AstroPT-MM.
 """
+
+from __future__ import annotations
 
 import logging
 import sys
@@ -28,6 +33,11 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 
+# Ensure repo root src is on sys.path
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+
 from astropt.dataloader_multimodal import MultimodalDatasetArrow
 from astropt.processors import DESISpectrumProcessor
 from astropt.model import ModalityRegistry, ModalityConfig
@@ -38,7 +48,7 @@ from sklearn.metrics import r2_score, mean_squared_error, accuracy_score, f1_sco
 from astropy.table import Table
 import warnings
 from astropy.utils.exceptions import AstropyWarning
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Optional, List, Tuple, Any, Dict
 from transformers import HfArgumentParser
 
@@ -53,53 +63,158 @@ class TrainingConfig:
     Aligned with AstroPT TrainingConfig and ResNet Baseline.
     """
     #--- Metadata & Paths ---#
-    target: str = "Z"                                      # Target column in catalog
-    train_name: str = "spectra_supervised_baseline"        # Name for the run
-    train_date: Optional[str] = None                       # Date of the training
-    train_dir: Optional[str] = None                        # Training output directory
-    seed: int = 42                                         # Random seed
-    metadata_path: str = "/home/valonso/iac18_aasensio_shared/euclid_dr1/catalog/catalog_MER_DR1_DESI_DR1_combined_wide_deep_v1.1_FILTERED.fits"
-    data_dir: str = "/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated"
+    target: str = field(
+        default="Z", 
+        metadata={"help": "Target column to predict from catalog (e.g. Z, phz_pp_median_redshift, LOGMSTAR, etc.)"}
+    )
+    train_name: str = field(
+        default="spectra_supervised_baseline", 
+        metadata={"help": "Experiment name identifier"}
+    )
+    train_date: Optional[str] = field(
+        default=None, 
+        metadata={"help": "Execution date in YYYYMMDD format"}
+    )
+    train_dir: Optional[str] = field(
+        default=None, 
+        metadata={"help": "Output directory where logs and weights are saved"}
+    )
+    seed: int = field(
+        default=42, 
+        metadata={"help": "Random seed for reproducibility"}
+    )
+    metadata_path: str = field(
+        default="/home/valonso/iac18_aasensio_shared/euclid_dr1/catalog/catalog_MER_DR1_DESI_DR1_combined_wide_deep_v1.1_FILTERED.fits",
+        metadata={"help": "Path to the FITS catalog containing target labels"}
+    )
+    data_dir: str = field(
+        default="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated",
+        metadata={"help": "Path to the processed Arrow dataset directory"}
+    )
     
     #--- Model Architecture ---#
-    seq_len_in: int = 7781          # Input sequence length (DESI spectra)
-    embed_dim: int = 256            # Embedding dimension for transformer
-    num_layers: int = 4             # Transformer encoder layers
-    num_heads: int = 8              # Transformer attention heads
-    dim_feedforward: int = 1024     # Expansion factor (4x embed_dim)
-    dropout: float = 0.1
+    seq_len_in: int = field(
+        default=7781, 
+        metadata={"help": "Input sequence length (DESI spectra)"}
+    )
+    embed_dim: int = field(
+        default=256, 
+        metadata={"help": "Embedding dimension for transformer"}
+    )
+    num_layers: int = field(
+        default=4, 
+        metadata={"help": "Transformer encoder layers"}
+    )
+    num_heads: int = field(
+        default=8, 
+        metadata={"help": "Transformer attention heads"}
+    )
+    dim_feedforward: int = field(
+        default=1024, 
+        metadata={"help": "Expansion factor in feedforward layer (4x embed_dim)"}
+    )
+    dropout: float = field(
+        default=0.1, 
+        metadata={"help": "Dropout rate"}
+    )
     
     #--- Data Loading ---#
-    batch_size: int = 64
-    num_workers: int = 4                                   # DataLoader workers
-    spiral: bool = False                                   # Not used for 1D spectra
+    batch_size: int = field(
+        default=64, 
+        metadata={"help": "Batch size for training and evaluation"}
+    )
+    num_workers: int = field(
+        default=4, 
+        metadata={"help": "Number of DataLoader worker processes"}
+    )
+    spiral: bool = field(
+        default=False, 
+        metadata={"help": "Not used for 1D spectra"}
+    )
     
     #--- Hyperparameters (AstroPT Aligned) ---#
-    max_iters: int = 75000                                 # Total training iters
-    init_from: str = "scratch"                             # "scratch" or "resume"
-    learning_rate: float = 3e-4                            # Max Learning rate
-    lr_min: float = 3e-5                                   # Min Learning rate
-    lr_warmup_iters: int = 5000                            # Warmup steps
-    lr_decay_iters: int = 70000                            # Decay steps
-    weight_decay: float = 0.1                              # Weight decay
-    beta1: float = 0.9                                     # AdamW parameter
-    beta2: float = 0.98                                    # AdamW parameter
+    max_iters: int = field(
+        default=75000, 
+        metadata={"help": "Total training iterations"}
+    )
+    init_from: str = field(
+        default="scratch", 
+        metadata={"help": "Initialization mode: 'scratch' or 'resume' from checkpoint"}
+    )
+    learning_rate: float = field(
+        default=3e-4, 
+        metadata={"help": "Peak learning rate"}
+    )
+    lr_min: float = field(
+        default=3e-5, 
+        metadata={"help": "Minimum learning rate after decay"}
+    )
+    lr_warmup_iters: int = field(
+        default=5000, 
+        metadata={"help": "Number of linear warmup iterations for learning rate"}
+    )
+    lr_decay_iters: int = field(
+        default=70000, 
+        metadata={"help": "Number of cosine decay iterations for learning rate"}
+    )
+    weight_decay: float = field(
+        default=0.1, 
+        metadata={"help": "AdamW weight decay coefficient"}
+    )
+    beta1: float = field(
+        default=0.9, 
+        metadata={"help": "AdamW beta1 hyperparameter"}
+    )
+    beta2: float = field(
+        default=0.98, 
+        metadata={"help": "AdamW beta2 hyperparameter"}
+    )
     
     #--- Spectra Processing ---#
-    spectra_norm_type: str = "asinh"
-    spectra_norm_scaler: float = 1.0
-    spectra_norm_const: float = 1.0
+    spectra_norm_type: str = field(
+        default="asinh", 
+        metadata={"help": "Normalization type for spectra ('asinh', 'minmax', 'zscore')"}
+    )
+    spectra_norm_scaler: float = field(
+        default=1.0, 
+        metadata={"help": "Normalization scaler parameter"}
+    )
+    spectra_norm_const: float = field(
+        default=1.0, 
+        metadata={"help": "Normalization constant parameter"}
+    )
     
     #--- Logging & Checkpointing ---#
-    eval_interval: int = 1000                               # How often to evaluate
-    eval_batches: int = 200                                 # How many batches for evaluation
-    log_interval: int = 200                                 # Console/CSV log interval
-    checkpoint_interval: int = 1000                         # How often to save model weights
-    early_stop_patience: int = 15                           # Limits iterations without validation loss improvement
-    early_stopping_min_iters: int = 50000                   # Minimum iterations before starting to count patience
+    eval_interval: int = field(
+        default=1000, 
+        metadata={"help": "Interval (in iterations) between evaluations"}
+    )
+    eval_batches: int = field(
+        default=200, 
+        metadata={"help": "Number of batches to evaluate on validation set"}
+    )
+    log_interval: int = field(
+        default=200, 
+        metadata={"help": "Interval (in iterations) between console log prints"}
+    )
+    checkpoint_interval: int = field(
+        default=1000, 
+        metadata={"help": "Interval (in iterations) between saving checkpoints"}
+    )
+    early_stop_patience: int = field(
+        default=15, 
+        metadata={"help": "Patience checks without validation improvement before early stopping"}
+    )
+    early_stopping_min_iters: int = field(
+        default=50000, 
+        metadata={"help": "Minimum training iterations before early stopping can trigger"}
+    )
     
     #--- System ---#
-    max_run_hours: Optional[str] = None                    # Time limit ("HH:MM:SS")
+    max_run_hours: Optional[str] = field(
+        default=None, 
+        metadata={"help": "Maximum execution time in 'HH:MM:SS' format"}
+    )
     
     def __post_init__(self):
         if self.train_date is None:

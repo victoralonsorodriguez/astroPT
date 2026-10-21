@@ -26,7 +26,7 @@ echo "Training AstroCLIP ($SLURM_JOB_ID) on node $SLURM_NODELIST - $NOW"
 echo "------------------------------------------------------"
 
 # Robust repository root detection based on script location
-# (Script is in slurm/legacy/, so REPO_ROOT is two levels up)
+# (Script is in slurm/baselines/, so REPO_ROOT is two levels up)
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 
@@ -36,7 +36,7 @@ if [[ "$REPO_ROOT" == "/var/spool"* ]]; then
 fi
 
 #--- DEFAULT VALUES ---#
-PYTHON_SCRIPT="$REPO_ROOT/scripts/legacy/train_astroclip_arrow.py"
+PYTHON_SCRIPT="$REPO_ROOT/scripts/baselines/baseline_astroclip_train.py"
 DATA_DIR="/home/valonso/iac18_aasensio_shared/euclid_dr1/processed_data_arrow_interpolated"
 TRAIN_DIR="logs/astroclip_arrow"
 TRAIN_NAME="New Train"
@@ -65,7 +65,15 @@ TRAIN_DIR=$(readlink -f "$TRAIN_DIR")
 echo "Changing directory to: $REPO_ROOT"
 cd "$REPO_ROOT" || { echo "[ERROR]: Cannot find REPO_ROOT: $REPO_ROOT"; exit 1; }
 
-source "$REPO_ROOT/.venv/bin/activate"
+if [ -d "$REPO_ROOT/.venv" ]; then
+    source "$REPO_ROOT/.venv/bin/activate"
+    PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
+elif [ -d "$REPO_ROOT/venv" ]; then
+    source "$REPO_ROOT/venv/bin/activate"
+    PYTHON_BIN="$REPO_ROOT/venv/bin/python"
+else
+    PYTHON_BIN="python3"
+fi
 
 export UV_CACHE_DIR="$REPO_ROOT/../cache/uv_cache"
 export HF_HOME="$REPO_ROOT/../cache/huggingface"
@@ -84,7 +92,7 @@ if [[ ! -f "$ASTRODINO_CKPT" || ! -f "$SPECFORMER_CKPT" ]]; then
 fi
 
 # Fast dependency check to avoid burning GPU time on immediate import crashes.
-if ! REPO_ROOT="$REPO_ROOT" "$REPO_ROOT/.venv/bin/python" - <<'PY'
+if ! REPO_ROOT="$REPO_ROOT" "$PYTHON_BIN" - <<'PY'
 import importlib
 import os
 from pathlib import Path
