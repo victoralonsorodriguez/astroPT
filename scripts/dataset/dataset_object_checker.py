@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 """
-AstroPT Dataset Object Checker
-==============================
+AstroPT-MM: Target Catalog Cross-Reference & Object Presence Checker
+=====================================================================
+Author: Victor Alonso Rodriguez
+Date: October 2026
 Description:
-    Checks if a list or table of objects (from a FITS, CSV, or Parquet file) 
-    exists in the Euclid/AstroPT training and test datasets.
-    Supports looking up targets by multiple ID columns (e.g. dual systems).
+    Verifies whether a list of astronomical targets (provided via FITS, CSV, or Parquet)
+    exists in the AstroPT-MM training and testing Arrow splits and the filtered metadata catalog.
+    Supports multi-column ID queries (e.g. dual systems, cross-survey matching).
+
+Usage:
+    python scripts/dataset/dataset_object_checker.py \\
+        --query_table /path/to/candidates.csv \\
+        --id_cols targetid ID \\
+        --metadata_fits /path/to/catalog_FILTERED.fits \\
+        --data_dir /path/to/processed_data_arrow_interpolated
 """
 
 import argparse

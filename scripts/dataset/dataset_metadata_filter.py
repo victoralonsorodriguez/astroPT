@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-AstroPT Catalog Filter & Clean Dataset Generator
-==================================================
-Author: Senior Astro-Data Scientist & PyTorch/HPC Infrastructure Engineer
+AstroPT-MM: Dual-Layer Catalog Quality Filter & Clean Dataset Generator
+========================================================================
+Author: Victor Alonso Rodriguez
+Date: May 2026
 Description:
-    Creates filtered FITS catalogs by applying two independent layers of filtering:
+    Generates verified, clean FITS catalogs by applying two independent layers of filtering:
     
     Layer 1 - Metadata Expressions: Applies arbitrary algebraic quality filters on 
               FITS catalog columns (e.g., SNR thresholds, redshift cuts, flag masks).
-              Uses the same expression syntax as AstroPT's `applied_filters` YAML config.
+              Uses the same expression syntax as AstroPT-MM applied_filters configuration.
     
-    Layer 2 - Image Quality Blacklist: Cross-references with the `dark_galaxies_registry.csv`
-              from the flux analyzer audit to remove TargetIDs whose images are corrupted 
+    Layer 2 - Image Quality Blacklist: Cross-references with dark_galaxies_registry.csv
+              from the flux analyzer audit to prune TargetIDs with corrupted imaging 
               (All-Black, Partially-Black, or NaN-Corrupted).
     
-    The output is a new, self-contained FITS catalog that can be used directly as 
-    `metadata_path` in the AstroPT training configuration, eliminating the need for 
-    runtime `applied_filters` evaluation during dataloader initialization.
+    Produces a self-contained FITS catalog for training (e.g., catalog_*_FILTERED.fits) 
+    eliminating runtime filter evaluations during dataloader initialization.
 
 Usage:
-    python catalog_filter.py \\
+    python scripts/dataset/dataset_metadata_filter.py \\
         --input_catalog /path/to/original.fits \\
         --output_catalog /path/to/filtered_clean.fits \\
         --filters '((Z < 0.15) && (SNR_SPEC_R > 3.0)) || ((Z >= 0.15) && (SNR_SPEC_Z > 3.0))' \\

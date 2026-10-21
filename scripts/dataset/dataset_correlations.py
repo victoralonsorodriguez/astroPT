@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-AstroPT Dataset Audit Pipeline
-=============================
-Author: Senior Astro-Data Scientist & PyTorch/HPC Infrastructure Engineer
+AstroPT-MM: Multimodal Catalog Correlation & Selection Bias Forensic Audit
+===========================================================================
+Author: Victor Alonso Rodriguez
+Date: May 2026
 Description: 
-    This script performs a multi-stage forensic data analysis of the AstroPT FITS
-    metadata catalog. It dynamically segregates instrumental control variables from
-    true physical galaxy properties, computes their Spearman rank correlations,
-    automatically detects highly coupled "Hot Variables" (selection biases), and
-    generates diagnostics via targeted pairplots (corner plots) to flag selection biases.
+    Performs forensic statistical analysis of the Euclid-DESI FITS metadata catalog.
+    Segregates observational/instrumental control parameters from physical galaxy properties,
+    computes Spearman rank correlation matrices, detects coupled selection biases,
+    and generates corner plots and correlation heatmaps (Figure 4.3 in Master Thesis).
+
+Usage:
+    python scripts/dataset/dataset_correlations.py \\
+        --metadata_path /path/to/catalog_FILTERED.fits \\
+        --output_dir /path/to/output_audit
 """
 
 import os

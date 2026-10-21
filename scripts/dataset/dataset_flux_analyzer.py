@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """
-AstroPT Dataset Flux Analyzer
-=============================
-Author: Senior Astro-Data Scientist & PyTorch/HPC Infrastructure Engineer
-Description: 
-    This script performs a rigorous data quality audit of Euclid VIS and NISP 
-    image fluxes in the processed AstroPT Apache Arrow dataset. It detects 
-    completely black (zero-flux) or NaN-corrupted galaxy images, cross-references 
-    them with the FITS catalog, identifies the underlying quality flags causing 
-    the blanks, and generates a recommended filter string for training.
+AstroPT-MM: Euclid Image Stamp Flux Integrity & Blank Detection Audit
+======================================================================
+Author: Victor Alonso Rodriguez
+Date: May 2026
+Description:
+    Performs systematic data quality auditing of Euclid VIS and NISP image cutouts 
+    in the Apache Arrow dataset. Identifies completely black (zero-flux), partially black, 
+    or NaN-corrupted galaxy images, correlates them with FITS catalog quality flags, 
+    and exports dark_galaxies_registry.csv to feed dataset_metadata_filter.py.
+
+Usage:
+    python scripts/dataset/dataset_flux_analyzer.py \\
+        --data_dir /path/to/processed_data_arrow_interpolated \\
+        --split train,test \\
+        --metadata_path /path/to/catalog.fits \\
+        --output_dir /path/to/output_audit
 """
 
 import os
