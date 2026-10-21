@@ -1,18 +1,22 @@
+#!/usr/bin/env python3
 """
-AstroPT Arrow Dataset Interpolation (Re-centering & Resizing)
+AstroPT-MM: Arrow Dataset Galaxy Stamp Interpolation & Resizing
+==============================================================
+Author: Victor Alonso Rodriguez
+Date: May 2026
+Description:
+    Applies the adaptive physical aperture scaling formula from Marc Huertas-Company
+    to normalize galaxy angular sizes across the Euclid DR1 dataset. Dynamically calculates 
+    the spatial bounding box based on the Sersic half-light radius (Re) and axis ratio (q),
+    crops or pads the stamp with constant background, and resamples to 224x224 pixels using skimage.
 
-This script applies the zooming/interpolation formula from Marc Huertas-Company
-to ensure that all galaxies have a consistent physical/angular size across the dataset.
-It dynamically calculates the bounding box based on the Sersic radius and ellipticity,
-crops (or pads) the image, and uses skimage to resize it back to 224x224.
-
-Usage example:
-python arrow_dataset_interpolation.py \
-    --data_dir /path/to/original_arrow \
-    --save_dir /path/to/resized_arrow \
-    --metadata_path /path/to/catalog.fits \
-    --col_radius sersic_sersic_vis_radius \
-    --col_q_ratio sersic_sersic_vis_axis_ratio
+Usage:
+    python scripts/preprocessing/arrow_dataset_interpolation.py \\
+        --data_dir /path/to/original_arrow \\
+        --save_dir /path/to/resized_arrow \\
+        --metadata_path /path/to/catalog.fits \\
+        --col_radius sersic_sersic_vis_radius \\
+        --col_q_ratio sersic_sersic_vis_axis_ratio
 """
 
 import argparse

@@ -1,12 +1,18 @@
+#!/usr/bin/env python3
 """
-Robust P99 Statistics Calculator using PyArrow Compute.
-
-This script uses PyArrow's compute kernel to safely cast and filter data 
-before moving it to Python/Numpy. This prevents type errors with nested 
-lists or null values.
-
-Author: Victor Alonso Rodríguez
+AstroPT-MM: Robust P99 Normalization Calculator
+===============================================
+Author: Victor Alonso Rodriguez
 Date: January 2026
+Description:
+    Computes 99th percentile (P99) flux statistics on Euclid imaging and DESI spectroscopy
+    following an asinh transformation. Uses PyArrow C++ compute kernels for out-of-core
+    memory-efficient calculation over sharded Apache Arrow tables.
+
+Usage:
+    python scripts/preprocessing/calculate_normalization.py \\
+        --data_dir /path/to/processed_arrow \\
+        --sample_prob 0.1
 """
 
 import argparse

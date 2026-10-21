@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """
-Hugging Face Arrow Dataset Metadata Repair Utility.
+AstroPT-MM: Arrow Dataset Metadata Repair Utility
+=================================================
+Author: Victor Alonso Rodriguez
+Date: May 2026
+Description:
+    Reconstructs missing or corrupted 'dataset_info.json' and 'state.json' metadata files
+    for Apache Arrow shards to ensure seamless compatibility with Hugging Face datasets.load_from_disk().
 
-Reconstructs missing or corrupted 'dataset_info.json' and 'state.json' metadata files
-for Apache Arrow shards to ensure compatibility with datasets.load_from_disk().
+Usage:
+    python scripts/preprocessing/repair_arrow_metadata.py \\
+        --data_dir /path/to/arrow_dataset_root \\
+        --splits train test
 """
 
 import argparse

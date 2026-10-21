@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
 """
-Stream conversion of raw Euclid-DESI Pickle batches into Apache Arrow datasets.
+AstroPT-MM: Raw Pickle to Apache Arrow Dataset Stream Converter
+==============================================================
+Author: Victor Alonso Rodriguez
+Date: May 2026
+Description:
+    Streams chunked raw pickle batches into Hugging Face Apache Arrow format with 500MB sharding.
+    Normalizes arrays for C-contiguity, ensures None-safety, extracts 4-band Euclid image cutouts
+    (VIS, NISP-Y, NISP-J, NISP-H) and DESI spectra components (flux, wavelength, ivar, mask).
 
-This script iterates through chunked Pickle batches, extracts image stamps (VIS, NISP)
-and 1D spectra (flux, wave, ivar, mask), normalizes data structures for memory contiguity,
-and streams records into Hugging Face Apache Arrow format with 500MB max sharding.
+Usage:
+    python scripts/preprocessing/pickle_to_arrow.py \\
+        --input_dir /path/to/raw_pickles \\
+        --output_dir /path/to/output_arrow \\
+        --splits train test
 """
 
 import argparse
